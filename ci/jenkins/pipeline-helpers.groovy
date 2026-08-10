@@ -9,110 +9,370 @@
 //
 // Add new helper functions here rather than in the Jenkinsfile.
 
+// ── Cross-platform shell dispatch ────────────────────────────────────────────
+//
+// The pipeline keeps its POSIX .sh scripts as the single source of truth and
+// runs them unchanged on BOTH Linux and Windows agents. On Unix the `sh` step
+// works natively. On Windows there is no /bin/sh, so we route the SAME command
+// body through a Git-Bash `bash.exe` via a `bat` step. This is the only place
+// that knows about the OS split — every other step calls shx()/shxStatus()/
+// shxStdout() so the command bodies stay identical across platforms.
+//
+// The Windows path does NOT use `bash -lc "<inline>"` (fragile with %, ", `,
+// $, and heredocs). Instead each command body is written to a temp .sh file in
+// the workspace via writeFile (CRLF normalised to LF) and executed by path, then
+// removed. See writeShxScript()/shx() below.
+//
+// resolveBash() and shx() are kept as separate methods so each compiles into its
+// own class method and stays well under the JVM 64 KB per-method bytecode limit.
+
+// Locate a POSIX bash on a Windows agent. Returns the absolute path, or null if
+// none is found. On Unix returns null (the native `sh` step is used instead, so
+// no bash discovery is needed). Discovery order:
+//   1. SLOC_BASH env override (explicit operator escape hatch), if it exists.
+//   2. `where bash` on PATH, skipping the WSL System32 shim (that bash.exe is a
+//      launcher for a Linux distro, not a usable POSIX shell for our scripts).
+//   3. Known Git-for-Windows install locations.
+def resolveBash() {
+    if (isUnix()) { return null }
+
+    // Cache the resolution for the duration of the build so we don't shell out
+    // to `where` on every single step.
+    if (env.SLOC_RESOLVED_BASH?.trim()) {
+        return env.SLOC_RESOLVED_BASH.trim()
+    }
+
+    // 1. Explicit override.
+    def override = env.SLOC_BASH?.trim()
+    if (override && fileExists(override)) {
+        env.SLOC_RESOLVED_BASH = override
+        return override
+    }
+
+    // 2. `where bash` — prefer a Git bash over the WSL System32 launcher.
+    def hits = ''
+    try {
+        hits = bat(returnStdout: true, script: '@where bash 2>NUL').trim()
+    } catch (Throwable t) {
+        hits = ''
+    }
+    def gitHit = null
+    def anyHit = null
+    hits.readLines().each { line ->
+        def p = line.trim()
+        if (!p) { return }
+        if (anyHit == null) { anyHit = p }
+        def lower = p.toLowerCase()
+        // Skip the WSL shim (lives under System32\bash.exe) — it is not a POSIX
+        // shell we can run .sh scripts through.
+        if (lower.contains('system32')) { return }
+        if (gitHit == null) { gitHit = p }
+    }
+    def picked = gitHit ?: anyHit
+    if (picked && fileExists(picked)) {
+        env.SLOC_RESOLVED_BASH = picked
+        return picked
+    }
+
+    // 3. Known Git-for-Windows locations.
+    def candidates = [
+        'C:\\Program Files\\Git\\bin\\bash.exe',
+        'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+        'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    ]
+    for (def c in candidates) {
+        if (fileExists(c)) {
+            env.SLOC_RESOLVED_BASH = c
+            return c
+        }
+    }
+    return null
+}
+
+// The actionable error shown on a Windows agent with no usable POSIX shell.
+def noBashError() {
+    error('No POSIX shell found on this Windows agent. Install Git for Windows ' +
+          '(provides Git Bash + curl/tar/grep/awk/sha256sum) or set the SLOC_BASH ' +
+          'environment variable to a bash.exe path. Alternatively pin this job to a ' +
+          'Linux agent via the AGENT_LABEL parameter.')
+}
+
+// Per-build monotonically-increasing counter used to name temp script files
+// uniquely. There is no Math.random()/new Date() available under the Groovy
+// sandbox, so uniqueness is derived from BUILD_NUMBER + this static counter.
+@groovy.transform.Field int shxCounter = 0
+
+// Write a command body to a unique temp script in the workspace and return the
+// workspace-relative path. The body is written VERBATIM (no `set -e...` is
+// prepended — many existing bodies already start with their own `set` line, and
+// double-setting would change behaviour). CRLF is normalised to LF so Git Bash
+// on Windows never chokes on a `\r` at the end of a `set -o pipefail` line.
+def writeShxScript(String cmd) {
+    shxCounter += 1
+    def name = ".shx-${env.BUILD_NUMBER ?: '0'}-${shxCounter}.sh"
+    // Strip CR so the script is pure-LF regardless of how the Groovy string was
+    // authored or checked out (Windows Git may have introduced CRLF).
+    def body = cmd.replace('\r\n', '\n').replace('\r', '\n')
+    writeFile file: name, text: body
+    return name
+}
+
+// Run a shell command. On Unix: native `sh` (unchanged). On Windows: the SAME
+// body is written to a temp .sh file and executed by Git Bash via a `bat` step
+// — NOT `bash -lc "<inline>"`, which is fragile with %, ", `, $, and heredocs.
+// The temp file is removed in a finally so a workspace never accumulates them.
+def shx(String cmd) {
+    if (isUnix()) {
+        sh cmd
+        return
+    }
+    def bash = resolveBash()
+    if (!bash) { noBashError() }
+    def tmp = writeShxScript(cmd)
+    try {
+        bat "\"${bash}\" \"${tmp}\""
+    } finally {
+        bat "if exist \"${tmp}\" del /q \"${tmp}\""
+    }
+}
+
+// Stdout-returning variant of shx (mirrors sh(returnStdout: true)). Returns the
+// captured stdout as a String (NOT trimmed — callers .trim() as today). The
+// leading `@` suppresses cmd.exe echoing the command line into the captured
+// output, so callers get only the script's own stdout.
+def shxStdout(String cmd) {
+    if (isUnix()) {
+        return sh(returnStdout: true, script: cmd)
+    }
+    def bash = resolveBash()
+    if (!bash) { noBashError() }
+    def tmp = writeShxScript(cmd)
+    try {
+        return bat(returnStdout: true, script: "@\"${bash}\" \"${tmp}\"")
+    } finally {
+        bat "@if exist \"${tmp}\" del /q \"${tmp}\""
+    }
+}
+
+// Status-returning variant of shx (mirrors sh(returnStatus: true)). Returns the
+// process exit code as an int.
+def shxStatus(String cmd) {
+    if (isUnix()) {
+        return sh(returnStatus: true, script: cmd)
+    }
+    def bash = resolveBash()
+    if (!bash) { noBashError() }
+    def tmp = writeShxScript(cmd)
+    try {
+        return bat(returnStatus: true, script: "\"${bash}\" \"${tmp}\"")
+    } finally {
+        bat "@if exist \"${tmp}\" del /q \"${tmp}\""
+    }
+}
+
+// ── OS-aware environment initialization ──────────────────────────────────────
+//
+// The declarative environment{} block cannot branch on isUnix(), so the
+// OS-dependent variables (CARGO_HOME / RUSTUP_HOME / PATH / BINARY /
+// ARTIFACT_PATH) are set here from an early script{} stage. Unix values are
+// IDENTICAL to what the environment{} block used to set; Windows PREPENDS the
+// cache bin dir to the inherited PATH (so System32 / Git / Python / cargo all
+// survive) and points BINARY/ARTIFACT_PATH at the .exe.
+def initEnv() {
+    if (isUnix()) {
+        def home = env.HOME
+        env.CARGO_HOME  = "${home}/.rust-cache/cargo"
+        env.RUSTUP_HOME = "${home}/.rust-cache/rustup"
+        env.PATH        = "${home}/.rust-cache/cargo/bin:/usr/local/bin:/usr/bin:/bin"
+        env.BINARY        = "${env.WORKSPACE}/target/release/oxide-sloc"
+        env.ARTIFACT_PATH = "${env.WORKSPACE}/target/release/oxide-sloc"
+    } else {
+        // On Windows HOME is often unset; fall back to USERPROFILE.
+        def home = (env.HOME?.trim() ?: env.USERPROFILE?.trim() ?: 'C:\\Users\\Default')
+        env.CARGO_HOME  = "${home}\\.rust-cache\\cargo"
+        env.RUSTUP_HOME = "${home}\\.rust-cache\\rustup"
+        // PREPEND the cache cargo bin dir to the INHERITED PATH — never replace
+        // it, or System32/Git/Python/cargo would vanish. Use the Windows path
+        // separator (;) and Windows path form for the prepended dir.
+        env.PATH = "${home}\\.rust-cache\\cargo\\bin;${env.PATH}"
+        // BINARY/ARTIFACT_PATH are consumed INSIDE `bash -lc` (shx / run-web-check.sh
+        // reference "${BINARY}"). A POSIX-style forward-slash path WITH the .exe
+        // suffix is what bash resolves correctly on Windows, so use that form.
+        // WORKSPACE on Windows uses backslashes — convert to forward slashes.
+        def wsPosix = env.WORKSPACE?.replace('\\', '/')
+        env.BINARY        = "${wsPosix}/target/release/oxide-sloc.exe"
+        env.ARTIFACT_PATH = "${wsPosix}/target/release/oxide-sloc.exe"
+    }
+    env.RUST_LOG = 'warn'
+}
+
+// ── Python interpreter resolution ────────────────────────────────────────────
+//
+// The pipeline shells out to several .py helpers. On Linux agents the
+// interpreter is `python3`. Git Bash on Windows usually ships `python` (and the
+// Windows launcher `py`) but NOT `python3`, so a hardcoded `python3` fails there.
+// Resolve once (SLOC_PY override wins) and cache on env for the rest of the
+// build. Callers use "${h.pyBin()} script.py ...". The value is resolved through
+// shx() so the same POSIX probe runs on both platforms.
+def pyBin() {
+    if (env.SLOC_RESOLVED_PY?.trim()) {
+        return env.SLOC_RESOLVED_PY.trim()
+    }
+    // Explicit operator escape hatch.
+    def override = env.SLOC_PY?.trim()
+    if (override) {
+        env.SLOC_RESOLVED_PY = override
+        return override
+    }
+    // Probe python3 → python → py, printing the first that runs. Runs through
+    // shx so Git Bash resolves it on Windows and /bin/sh on Linux.
+    def picked = ''
+    try {
+        picked = shxStdout('''
+            if command -v python3 >/dev/null 2>&1; then echo python3
+            elif command -v python >/dev/null 2>&1; then echo python
+            elif command -v py >/dev/null 2>&1; then echo py
+            else echo python3
+            fi
+        ''').trim().readLines().findAll { it?.trim() }.last()?.trim()
+    } catch (Throwable t) {
+        picked = ''
+    }
+    def resolved = picked ?: 'python3'
+    env.SLOC_RESOLVED_PY = resolved
+    return resolved
+}
+
 def runSetup() {
     // Disk preflight FIRST: fail fast on a low-space volume and prune the
     // persistent Rust cache if it has grown past its cap, so a build never dies
     // mid-run with ENOSPC and the cache that survives cleanWs() stays bounded.
-    sh 'bash ci/jenkins/check-disk-space.sh'
+    shx 'bash ci/jenkins/check-disk-space.sh'
 
-    sh 'bash ci/jenkins/setup-toolchain.sh'
-    sh 'bash ci/jenkins/setup-vendor.sh'
+    shx 'bash ci/jenkins/setup-toolchain.sh'
+    shx 'bash ci/jenkins/setup-vendor.sh'
 
-    // Relax artifact-viewer CSP so HTML report artifacts render with inline
-    // styles and scripts.  Three-tier approach (each tier falls back silently):
-    //   1. Direct System.setProperty — works when the Groovy sandbox is disabled
-    //   2. Script Console REST API — requires credential 'jenkins-api-token'
-    //   3. init.groovy.d — permanent fix: bash ci/jenkins/preflight.sh --install-csp
+    // ── Artifact-viewer CSP (OPTIONAL — the build succeeds without it) ─────────
+    //
+    // Relaxing the CSP only affects the styling/interactivity of the INTERACTIVE
+    // artifact viewer on very old controllers. It is genuinely optional:
+    //   * extract-report-assets.py externalises the report's inline CSS/JS so the
+    //     HTML report renders under Jenkins' DEFAULT CSP with no relaxation, and
+    //   * modern Jenkins (2.387.x+) serves CSP report-only (non-blocking).
+    // So this whole block is best-effort and NEVER fails the build. Three tiers,
+    // in order of preference:
+    //   1. Direct System.setProperty  — works only when the Groovy sandbox is off
+    //   2. Script Console REST API     — needs the OPTIONAL 'jenkins-api-token'
+    //   3. init.groovy.d/relax-csp.groovy — the permanent, credential-free,
+    //      sandbox-proof fix (bash ci/jenkins/preflight.sh --install-csp)
     def RELAXED_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
                       "img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; " +
                       "font-src 'self' data:;"
     def cspSet = false
 
+    // Tier 1 — direct set. Succeeds when the sandbox is disabled; when the
+    // sandbox is active this throws a RejectedAccessException. That is the NORMAL,
+    // expected state on a Pipeline-from-SCM job, so treat it as such: no alarming
+    // exception dump — we simply fall through to the calm summary below.
     try {
         System.setProperty('hudson.model.DirectoryBrowserSupport.CSP', RELAXED_CSP)
         echo 'Artifact-viewer CSP relaxed (direct System.setProperty).'
         cspSet = true
-    } catch (Exception ex) {
-        echo "Direct CSP set blocked (sandbox active): ${ex.message}"
+    } catch (Throwable ignore) {
+        // Sandbox active (the common case) — handled by Tier 2 / the summary below.
     }
 
+    // Tier 2 — Script Console REST API, using the OPTIONAL 'jenkins-api-token'
+    // credential. A missing credential is the EXPECTED path, not an error: the
+    // withCredentials binding throws "credentials entry ... not found" when the
+    // token is absent, which we classify as the quiet path and route to the calm
+    // summary below (never a raw exception dump). Any OTHER error still gets a
+    // short note. This runs quietly under the sandbox — no static Jenkins API
+    // calls are made from Groovy (those would be RejectedAccessException anyway).
     if (!cspSet) {
         try {
             withCredentials([string(credentialsId: 'jenkins-api-token',
                                     variable:      'JEN_API_TOK')]) {
-                if (env.JEN_API_TOK?.trim()) {
-                    def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
-                    if (base) {
-                        withEnv(["SLOC_JENKINS_BASE=${base}",
-                                 "SLOC_CSP=${RELAXED_CSP}",
-                                 // Derive the API user from the same place runArchivePublish
-                                 // does — JENKINS_API_USER, defaulting to admin — rather than
-                                 // hardcoding 'admin'.
-                                 "SLOC_JENKINS_USER=${env.JENKINS_API_USER ?: 'admin'}"]) {
-                            // Report success ONLY when the Script Console POST returns 200.
-                            // The old code echoed success unconditionally (a lie) and used the
-                            // "::" xpath separator, which Jenkins rejects with HTTP 403
-                            // ("primitive XPath result sets forbidden") — only the exact
-                            // concat(...,":",...) form is whitelisted. Split the crumb on the
-                            // FIRST ':' only (crumb values never contain ':').
-                            def cspStatus = sh(returnStatus: true, script: '''
-                                CRUMB=$(curl -fsS -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
-                                    "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)" \
-                                    2>/dev/null || echo "")
-                                FIELD="${CRUMB%%:*}"
-                                CRUMB_VAL="${CRUMB#*:}"
-                                GROOVY="System.setProperty(\"hudson.model.DirectoryBrowserSupport.CSP\",\"${SLOC_CSP}\")"
-                                # A modern LTS exempts API-token POSTs from CSRF, so proceed
-                                # even when the crumb fetch returned nothing; only the HTTP
-                                # code decides success.
-                                if [ -n "${FIELD}" ] && [ -n "${CRUMB_VAL}" ]; then
-                                    CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
-                                        -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
-                                        -H "${FIELD}: ${CRUMB_VAL}" \
-                                        --data-urlencode "script=${GROOVY}" \
-                                        "${SLOC_JENKINS_BASE}/scriptText" 2>/dev/null || echo 000)
-                                else
-                                    CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
-                                        -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
-                                        --data-urlencode "script=${GROOVY}" \
-                                        "${SLOC_JENKINS_BASE}/scriptText" 2>/dev/null || echo 000)
-                                fi
-                                if [ "${CODE}" = "200" ]; then
-                                    echo "Artifact-viewer CSP relaxed (Script Console API)."
-                                    exit 0
-                                fi
-                                echo "Script Console CSP relaxation returned HTTP ${CODE} (not applied)."
-                                exit 1
-                            ''')
-                            if (cspStatus != 0) {
-                                echo 'In-pipeline CSP relaxation did not take effect. For a ' +
-                                     'permanent fix, deploy ci/jenkins/init.groovy.d/relax-csp.groovy ' +
-                                     '(bash ci/jenkins/preflight.sh --install-csp).'
-                            }
-                        }
+                def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
+                if (env.JEN_API_TOK?.trim() && base) {
+                    withEnv(["SLOC_JENKINS_BASE=${base}",
+                             "SLOC_CSP=${RELAXED_CSP}",
+                             // Derive the API user from the same place runArchivePublish
+                             // does — JENKINS_API_USER, defaulting to admin — rather than
+                             // hardcoding 'admin'.
+                             "SLOC_JENKINS_USER=${env.JENKINS_API_USER ?: 'admin'}"]) {
+                        // Report success ONLY when the Script Console POST returns 200.
+                        // Use the exact concat(...,":",...) xpath (the "::" form is
+                        // rejected with HTTP 403) and split the crumb on the FIRST ':'
+                        // only (crumb values never contain ':').
+                        def cspStatus = shxStatus('''
+                            CRUMB=$(curl -fsS -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
+                                "${SLOC_JENKINS_BASE}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)" \
+                                2>/dev/null || echo "")
+                            FIELD="${CRUMB%%:*}"
+                            CRUMB_VAL="${CRUMB#*:}"
+                            GROOVY="System.setProperty(\"hudson.model.DirectoryBrowserSupport.CSP\",\"${SLOC_CSP}\")"
+                            # A modern LTS exempts API-token POSTs from CSRF, so proceed
+                            # even when the crumb fetch returned nothing; only the HTTP
+                            # code decides success.
+                            if [ -n "${FIELD}" ] && [ -n "${CRUMB_VAL}" ]; then
+                                CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+                                    -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
+                                    -H "${FIELD}: ${CRUMB_VAL}" \
+                                    --data-urlencode "script=${GROOVY}" \
+                                    "${SLOC_JENKINS_BASE}/scriptText" 2>/dev/null || echo 000)
+                            else
+                                CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+                                    -u "${SLOC_JENKINS_USER}:${JEN_API_TOK}" \
+                                    --data-urlencode "script=${GROOVY}" \
+                                    "${SLOC_JENKINS_BASE}/scriptText" 2>/dev/null || echo 000)
+                            fi
+                            if [ "${CODE}" = "200" ]; then
+                                echo "Artifact-viewer CSP relaxed (Script Console API)."
+                                exit 0
+                            fi
+                            echo "Script Console CSP relaxation returned HTTP ${CODE} (not applied)."
+                            exit 1
+                        ''')
+                        if (cspStatus == 0) { cspSet = true }
                     }
-                } else {
-                    echo 'jenkins-api-token not configured and Groovy sandbox is active.'
-                    echo 'To fix permanently: bash ci/jenkins/preflight.sh --install-csp'
-                    echo 'Or disable "Use Groovy Sandbox" in the pipeline job configuration.'
                 }
             }
-        } catch (Exception ex) {
-            echo "CSP setup via API (non-fatal): ${ex.message}"
+        } catch (Throwable ex) {
+            // A "credentials entry ... not found" is the expected/quiet path —
+            // stay silent and let the friendly summary below explain the
+            // (optional) situation. Any OTHER error is worth a short note.
+            def msg = ex.message ?: ''
+            if (!(msg.contains('not found') || msg.contains('Could not find') ||
+                  msg.contains('CredentialNotFoundException'))) {
+                echo "CSP auto-relax via API skipped: ${msg}"
+            }
         }
+    }
+
+    // Single, calm INFO summary when neither in-pipeline tier applied the CSP.
+    // This is expected on a sandboxed Pipeline-from-SCM job with no api token —
+    // it is optional and non-fatal, so say so plainly (no exception dump).
+    if (!cspSet) {
+        echo 'CSP auto-relax skipped (Groovy sandbox active and no ' +
+             "'jenkins-api-token' credential). This is OPTIONAL and non-fatal — " +
+             'HTML reports still render (inline CSS/JS is externalised by ' +
+             'extract-report-assets.py, and modern Jenkins serves CSP report-only). ' +
+             'For interactive artifact-viewer styling on older Jenkins, install ' +
+             'ci/jenkins/init.groovy.d/relax-csp.groovy (permanent, no credentials, ' +
+             'sandbox-proof) or run: bash ci/jenkins/preflight.sh --install-csp.'
     }
 }
 
 def runUnitTests() {
     def outDir     = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
     def resultsDir = "${outDir}/test-results"
-    sh "mkdir -p '${resultsDir}'"
+    shx "mkdir -p '${resultsDir}'"
 
     def useNextest = false
     if (params.TEST_RUNNER == 'cargo-nextest') {
-        def alreadyInstalled = sh(
-            script: 'cargo nextest --version >/dev/null 2>&1',
-            returnStatus: true
+        def alreadyInstalled = shxStatus(
+            'cargo nextest --version >/dev/null 2>&1'
         ) == 0
         if (!alreadyInstalled) {
             echo 'cargo-nextest not found — attempting offline install from vendor...'
@@ -133,8 +393,7 @@ def runUnitTests() {
             // the vendor set carries 0.4.45 by design (see ci/tools/Cargo.toml).
             // The `--locked` online fallback is a no-op offline (it just fails and
             // the unstable() branch fires) but lets a networked agent recover.
-            def installed = sh(
-                script: '''
+            def installed = shxStatus('''
                     {
                         if [ -d vendor/cargo-nextest ]; then
                             rm -rf .ci-tools && mkdir -p .ci-tools
@@ -145,10 +404,8 @@ def runUnitTests() {
                             cargo install --locked cargo-nextest
                         fi
                     } > .nextest-install.log 2>&1
-                ''',
-                returnStatus: true
-            ) == 0
-            sh 'tail -5 .nextest-install.log 2>/dev/null || true'
+                ''') == 0
+            shx 'tail -5 .nextest-install.log 2>/dev/null || true'
             if (installed) {
                 echo 'cargo-nextest installed from vendor successfully.'
                 useNextest = true
@@ -174,15 +431,15 @@ def runUnitTests() {
         // shebang + pipefail is required — dash rejects `set -o pipefail`). The
         // status is acted on AFTER the junit move/publish below, so a red or
         // aborted run still gets its report collected.
-        def testStatus = sh(script: """#!/bin/bash
+        def testStatus = shxStatus("""#!/bin/bash
             set -o pipefail
             cargo nextest run --workspace ${failFastFlag} --profile ci \
                 2>&1 | tee '${resultsDir}/nextest-output.txt'
-        """, returnStatus: true)
+        """)
         // nextest writes JUnit XML into the profile store dir
         // (target/nextest/ci/junit.xml), NOT the workspace root. Move from there;
         // fall back to a search in case a custom CARGO_TARGET_DIR relocates it.
-        sh """
+        shx """
             if [ -f target/nextest/ci/junit.xml ]; then
                 mv -f target/nextest/ci/junit.xml '${resultsDir}/junit.xml'
             else
@@ -212,16 +469,16 @@ def runUnitTests() {
         }
     } else {
         def failFastFlag = params.TEST_FAIL_FAST ? '' : '--no-fail-fast'
-        sh "cargo test --workspace ${failFastFlag}"
+        shx "cargo test --workspace ${failFastFlag}"
     }
 }
 
 def runCoverage() {
     def outDir      = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
     def coverageDir = "${outDir}/coverage"
-    sh "mkdir -p '${coverageDir}'"
+    shx "mkdir -p '${coverageDir}'"
 
-    sh '''
+    shx '''
         if ! cargo llvm-cov --version >/dev/null 2>&1; then
             echo "Installing cargo-llvm-cov from vendor (offline)..."
             cargo install --offline cargo-llvm-cov || \
@@ -230,9 +487,9 @@ def runCoverage() {
         rustup component add llvm-tools 2>/dev/null || true
     '''
 
-    sh "bash ci/sonar/generate-coverage.sh '${coverageDir}'"
+    shx "bash ci/sonar/generate-coverage.sh '${coverageDir}'"
 
-    sh """
+    shx """
         if cargo llvm-cov --version >/dev/null 2>&1; then
             echo "==> Generating HTML report with cargo-llvm-cov"
             cargo llvm-cov --workspace --all-features \
@@ -371,7 +628,7 @@ def runAnalyze() {
     }
 
     def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-    sh "mkdir -p '${outDir}'"
+    shx "mkdir -p '${outDir}'"
 
     // scanRoot is where the project-under-analysis lives: the workspace root for a
     // self-scan, or ./_target when TARGET_REPO_URL was checked out (set in Checkout).
@@ -415,13 +672,12 @@ def runAnalyze() {
     // target checkout's HEAD when scanning an external project.
     def shortSha
     if (scanningExternal) {
-        shortSha = sh(script: "git -C '${scanRoot}' rev-parse --short HEAD 2>/dev/null || echo unknown",
-                      returnStdout: true).trim()
+        shortSha = shxStdout("git -C '${scanRoot}' rev-parse --short HEAD 2>/dev/null || echo unknown").trim()
     } else {
         def rawSha = env.GIT_COMMIT?.trim() ?: ''
         shortSha = (rawSha.length() >= 7)
                         ? rawSha[0..6]
-                        : sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                        : shxStdout('git rev-parse --short HEAD').trim()
     }
     def projectSlug = "${repoSlug}_${shortSha}"
     env.SLOC_PROJECT = projectSlug
@@ -465,7 +721,7 @@ def runAnalyze() {
 
     // a. Quick plain summary
     withEnv(["SCAN_PATH=${effScan}"]) {
-        sh '''
+        shx '''
             "${BINARY}" analyze "${SCAN_PATH}" --plain ''' + configArg + '''
         '''
     }
@@ -482,7 +738,7 @@ def runAnalyze() {
         "REPORT_TITLE=${params.REPORT_TITLE}",
         "MIXED_LINE_POLICY=${params.MIXED_LINE_POLICY}",
     ]) {
-        sh '''
+        shx '''
             "${BINARY}" analyze "${SCAN_PATH}" \
                 --report-title "${REPORT_TITLE}" \
                 --mixed-line-policy "${MIXED_LINE_POLICY}" \
@@ -493,14 +749,14 @@ def runAnalyze() {
         '''
     }
 
-    sh "test -s '${outDir}/result_${projectSlug}.json'"
-    sh "test -s '${outDir}/report_${projectSlug}.csv'"
-    sh "test -s '${outDir}/report_${projectSlug}.xlsx'"
-    if (params.GENERATE_HTML) { sh "test -s '${outDir}/report_${projectSlug}.html'" }
+    shx "test -s '${outDir}/result_${projectSlug}.json'"
+    shx "test -s '${outDir}/report_${projectSlug}.csv'"
+    shx "test -s '${outDir}/report_${projectSlug}.xlsx'"
+    if (params.GENERATE_HTML) { shx "test -s '${outDir}/report_${projectSlug}.html'" }
 
     // c. Per-file breakdown
     withEnv(["SCAN_PATH=${effScan}"]) {
-        sh '''
+        shx '''
             "${BINARY}" analyze "${SCAN_PATH}" --per-file --plain ''' + configArg + '''
         '''
     }
@@ -508,7 +764,7 @@ def runAnalyze() {
     // d. HTML content sanity checks
     if (params.GENERATE_HTML) {
         withEnv(["REPORT_TITLE=${params.REPORT_TITLE}"]) {
-            sh '''
+            shx '''
                 grep -q 'OxideSLOC' "''' + outDir + '''/report_''' + projectSlug + '''.html"
                 grep -qF "${REPORT_TITLE}" "''' + outDir + '''/report_''' + projectSlug + '''.html"
             '''
@@ -517,13 +773,13 @@ def runAnalyze() {
 
     // e. Extract inline CSS/JS so the report renders under Jenkins's default CSP.
     if (params.GENERATE_HTML) {
-        sh "python3 ci/jenkins/extract-report-assets.py '${outDir}/report_${projectSlug}.html' || true"
+        shx "${pyBin()} ci/jenkins/extract-report-assets.py '${outDir}/report_${projectSlug}.html' || true"
     }
 
     // f. Mixed-line policy matrix — spot-checks all four policies
     for (def policy in ['code-only', 'code-and-comment', 'comment-only', 'separate-mixed-category']) {
         withEnv(["SCAN_PATH=${effScan}"]) {
-            sh '''
+            shx '''
                 "${BINARY}" analyze "${SCAN_PATH}" --plain --mixed-line-policy ''' + policy + '''
             '''
         }
@@ -536,7 +792,7 @@ def runArchivePublish() {
     def jobSlug  = (env.JOB_NAME?.replaceAll('[^a-zA-Z0-9_\\-]', '_') ?: 'oxide-sloc')
     def histFile = "${env.HOME}/.oxide-sloc-history/${jobSlug}.csv"
 
-    sh "python3 ci/jenkins/generate-trend-csv.py '${outDir}' '${proj}' '${histFile}'"
+    shx "${pyBin()} ci/jenkins/generate-trend-csv.py '${outDir}' '${proj}' '${histFile}'"
 
     // Detect what this build is allowed to do (system-admin ⇒ may install the
     // richer visualization plugins; otherwise degrade to the native dashboard).
@@ -555,8 +811,8 @@ def runArchivePublish() {
             // "degraded / read-only") and would also defeat Jenkins' secret masking.
             withEnv(["JENKINS_BASE_URL=${base}",
                      "JENKINS_USER=${env.JENKINS_API_USER ?: 'admin'}"]) {
-                sh "JENKINS_AUTH_TOKEN=\"\$SLOC_JTOKEN\" python3 ci/jenkins/detect-capabilities.py '${outDir}' || true"
-                sh "JENKINS_AUTH_TOKEN=\"\$SLOC_JTOKEN\" bash ci/jenkins/install-plugins.sh '${outDir}' || true"
+                shx "JENKINS_AUTH_TOKEN=\"\$SLOC_JTOKEN\" ${pyBin()} ci/jenkins/detect-capabilities.py '${outDir}' || true"
+                shx "JENKINS_AUTH_TOKEN=\"\$SLOC_JTOKEN\" bash ci/jenkins/install-plugins.sh '${outDir}' || true"
             }
         }
     } catch (Exception ex) {
@@ -565,7 +821,7 @@ def runArchivePublish() {
         echo "Capability probe running without API credentials: ${ex.message}"
         def base = (env.BUILD_URL ?: '').replaceAll('/job/.*', '').replaceAll('/+$', '')
         withEnv(["JENKINS_BASE_URL=${base}"]) {
-            sh "python3 ci/jenkins/detect-capabilities.py '${outDir}' || true"
+            shx "${pyBin()} ci/jenkins/detect-capabilities.py '${outDir}' || true"
         }
     }
 
@@ -573,7 +829,7 @@ def runArchivePublish() {
     // BEFORE archiving so the bundle layout is present for both archive + publish.
     def dashboardBuilt = false
     try {
-        sh "python3 ci/jenkins/generate-dashboard.py '${outDir}' '${proj}' '${histFile}'"
+        shx "${pyBin()} ci/jenkins/generate-dashboard.py '${outDir}' '${proj}' '${histFile}'"
         dashboardBuilt = fileExists("${outDir}/ci-report/index.html")
     } catch (Exception ex) {
         echo "generate-dashboard.py did not run (Python 3 unavailable or script error): ${ex.message}"
@@ -706,7 +962,7 @@ def runPushArtifacts() {
         def binaryName = isUnix() ? 'oxide-sloc' : 'oxide-sloc.exe'
         def binaryPath = "${env.WORKSPACE}/target/release/${binaryName}"
         if (fileExists(binaryPath)) {
-            sh "cp '${binaryPath}' '${outDir}/${binaryName}'"
+            shx "cp '${binaryPath}' '${outDir}/${binaryName}'"
             filesToPush << binaryName
         } else {
             echo "WARNING: binary not found at ${binaryPath} — skipping binary push."
@@ -718,7 +974,7 @@ def runPushArtifacts() {
             && params.TEST_RUNNER == 'cargo-nextest') {
         def junitPath = "${env.WORKSPACE}/test-results/junit.xml"
         if (fileExists(junitPath)) {
-            sh "cp '${junitPath}' '${outDir}/junit.xml'"
+            shx "cp '${junitPath}' '${outDir}/junit.xml'"
             filesToPush << 'junit.xml'
         } else {
             echo "WARNING: junit.xml not found at ${junitPath} — skipping junit push."
@@ -730,7 +986,7 @@ def runPushArtifacts() {
          ['coverage/sonar-coverage.xml', 'sonar-coverage.xml']].each { src, dst ->
             def srcPath = "${env.WORKSPACE}/${src}"
             if (fileExists(srcPath)) {
-                sh "cp '${srcPath}' '${outDir}/${dst}'"
+                shx "cp '${srcPath}' '${outDir}/${dst}'"
                 filesToPush << dst
             }
         }
@@ -763,7 +1019,7 @@ def runPushArtifacts() {
                 "ARTIFACT_REPO_PASS=${env.SLOC_AR_PASS ?: ''}",
                 "ARTIFACT_GENERATE_MANIFEST=${params.ARTIFACT_GENERATE_MANIFEST}",
             ]) {
-                sh 'bash ci/artifact-push.sh'
+                shx 'bash ci/artifact-push.sh'
             }
         }
     } catch (Exception ex) {
@@ -779,7 +1035,7 @@ def runPushArtifacts() {
             "ARTIFACT_REPO_PASS=",
             "ARTIFACT_GENERATE_MANIFEST=${params.ARTIFACT_GENERATE_MANIFEST}",
         ]) {
-            sh 'bash ci/artifact-push.sh'
+            shx 'bash ci/artifact-push.sh'
         }
     }
 }
@@ -792,9 +1048,11 @@ def runGitRefCompare() {
         "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
         "SCAN_ROOT=${env.SCAN_ROOT ?: env.WORKSPACE}",
     ]) {
-        sh '''
+        shx '''
             OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
-            BINARY="${WORKSPACE}/target/release/oxide-sloc"
+            # Honour the OS-aware BINARY exported by initEnv (carries .exe on
+            # Windows); fall back to the POSIX default when it is unset.
+            BINARY="${BINARY:-${WORKSPACE}/target/release/oxide-sloc}"
             # Git operations target the scanned repo (workspace root for a self-scan,
             # ./_target when TARGET_REPO_URL was checked out).
             REPO="${SCAN_ROOT:-$WORKSPACE}"
@@ -917,15 +1175,12 @@ def runPostSuccess() {
         def lcovPath = "${outDir}/coverage/lcov.info"
         if (fileExists(lcovPath)) {
             try {
-                def pct = sh(
-                    script: """
+                def pct = shxStdout("""
                         TOTAL=\$(grep -E '^LF:' '${lcovPath}' | awk -F: '{s+=\$2} END{print s+0}')
                         HIT=\$(grep -E '^LH:' '${lcovPath}'   | awk -F: '{s+=\$2} END{print s+0}')
                         [ "\${TOTAL}" -gt 0 ] && \
                             awk "BEGIN { printf \\"%.1f\\", (\${HIT}/\${TOTAL})*100 }" || echo "N/A"
-                    """,
-                    returnStdout: true
-                ).trim()
+                    """).trim()
                 if (pct != 'N/A') {
                     covStr = pct
                     desc += " · ${pct}% cov"
@@ -945,8 +1200,8 @@ def runPostSuccess() {
                      "SLOC_TESTS=${testsStr}",
                      "SLOC_COV=${covStr}",
                      "SLOC_STYLE=${styleStr}"]) {
-                sh """
-                    python3 ci/jenkins/build-summary.py \
+                shx """
+                    ${pyBin()} ci/jenkins/build-summary.py \
                         '${outDir}/result_${proj}.json' '${outDir}' \
                         --scan-path "\${SLOC_SCAN_PATH}" \
                         --tests "\${SLOC_TESTS}" \
@@ -1064,7 +1319,7 @@ def runBitbucketNotify() {
                      "BUILD_KEY=${env.JOB_NAME ?: 'oxide-sloc'}",
                      "BUILD_NAME=oxide-sloc CI #${env.BUILD_NUMBER}",
                      "REPORT_URL=${reportUrl}"]) {
-                sh "BITBUCKET_TOKEN=\"\$SLOC_BB_TOKEN\" bash ci/jenkins/notify-bitbucket.sh ${bbState} || true"
+                shx "BITBUCKET_TOKEN=\"\$SLOC_BB_TOKEN\" bash ci/jenkins/notify-bitbucket.sh ${bbState} || true"
             }
         }
     } catch (Exception ex) {
@@ -1081,7 +1336,7 @@ def runBitbucketNotify() {
                      "CONFLUENCE_PARENT_ID=${env.CONFLUENCE_PARENT_ID ?: ''}",
                      "CONFLUENCE_PAGE_TITLE=${env.CONFLUENCE_PAGE_TITLE ?: ''}",
                      "REPORT_URL=${reportUrl}"]) {
-                sh "CONFLUENCE_TOKEN=\"\$SLOC_CF_TOKEN\" python3 ci/jenkins/notify-confluence.py '${outDir}' '${proj}' || true"
+                shx "CONFLUENCE_TOKEN=\"\$SLOC_CF_TOKEN\" ${pyBin()} ci/jenkins/notify-confluence.py '${outDir}' '${proj}' || true"
             }
         }
     } catch (Exception ex) {

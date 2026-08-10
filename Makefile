@@ -79,4 +79,5 @@ jenkins-tests:
 	python3 ci/jenkins/tests/test-notify-confluence.py
 	python3 ci/jenkins/tests/test-pipeline-helpers-guards.py
 	python3 ci/jenkins/tests/test-repo-url-airgap.py
+	python3 ci/jenkins/tests/test-windows-agent-dispatch.py
 	bash   ci/jenkins/tests/test-notify-bitbucket.sh

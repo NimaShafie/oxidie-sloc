@@ -1,6 +1,11 @@
 <?xml version='1.1' encoding='UTF-8'?>
 <!-- Template: render with ci/jenkins/render-job-config.sh before use. -->
 <!-- Importable Pipeline-from-SCM job definition. Bootstrap: see ci/jenkins/README.md -->
+<!-- Build parameters (including AGENT_LABEL — pin to a Linux node to avoid the
+     Windows Git-Bash requirement) are DISCOVERED from the Jenkinsfile parameters{}
+     block on the first build, not enumerated here. Run one unparameterized build
+     to seed the form; the full form appears from build #2. The Jenkinsfile is the
+     single source of truth for the parameter list. -->
 <flow-definition plugin="workflow-job">
   <description>oxide-sloc — SLOC analysis pipeline. Scans source repositories and produces HTML, JSON, and PDF reports with build-over-build trend data.</description>
   <keepDependencies>false</keepDependencies>

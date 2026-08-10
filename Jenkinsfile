@@ -24,7 +24,15 @@ def h   // loaded after Checkout; all runXxx() calls below delegate here
 
 // ── Pipeline ───────────────────────────────────────────────────────────────
 pipeline {
-    agent any
+    // Honour the AGENT_LABEL build parameter so an operator can pin the job to a
+    // specific node — most importantly a LINUX node, since the POSIX .sh scripts
+    // that drive every stage need a shell. On Windows agents the pipeline runs
+    // them through Git Bash via the shx() helper (see pipeline-helpers.groovy),
+    // but pinning to Linux via AGENT_LABEL avoids the Git-Bash requirement
+    // entirely. An empty label ('' — the default) means "any available agent",
+    // preserving today's behaviour. params.AGENT_LABEL is safe to reference here:
+    // Jenkins resolves the parameters block before selecting the agent.
+    agent { label "${params.AGENT_LABEL ?: ''}" }
 
     options {
         skipDefaultCheckout(true)
@@ -521,26 +529,35 @@ pipeline {
         string(name: 'UPSTREAM_JOB',   defaultValue: '', description: 'Name of the upstream pipeline that triggered this build (for chaining)')
         string(name: 'UPSTREAM_BUILD', defaultValue: '', description: 'Build number of the upstream job')
         string(name: 'DOWNSTREAM_JOB', defaultValue: '', description: 'Pipeline job to trigger on success (leave empty to disable)')
+
+        // ── Agent selection ────────────────────────────────────────────────────
+        string(
+            name:         'AGENT_LABEL',
+            defaultValue: '',
+            description:  '(optional) Node label to pin this build to. BLANK = any available agent. ' +
+                          'The pipeline drives every stage through POSIX .sh scripts; on a LINUX ' +
+                          'agent they run natively, on a WINDOWS agent they run through Git Bash ' +
+                          '(install Git for Windows, or set the SLOC_BASH env var to a bash.exe path). ' +
+                          'Set this to a Linux label (e.g. "linux" or "built-in") to avoid the ' +
+                          'Git-Bash requirement on mixed Windows/Linux controllers.'
+        )
     }
 
-    environment {
-        // Persistent Rust toolchain cache — stored in the agent user's home directory so
-        // it survives cleanWs() across builds.  Works for both Docker and native Jenkins:
-        //   Docker  (jenkins/jenkins:lts):  HOME=/var/jenkins_home
-        //   Native  (systemd / bare-metal): HOME=/var/lib/jenkins  (or wherever jenkins lives)
-        // One-time setup per agent:
-        //   Docker : rebuild ci/jenkins/Dockerfile.agent (toolchain baked at /opt/rust-toolchain)
-        //   Native : sudo bash ci/jenkins/install-system-deps.sh
-        //            bash ci/jenkins/install-rust-cache.sh
-        CARGO_HOME  = "${env.HOME}/.rust-cache/cargo"
-        RUSTUP_HOME = "${env.HOME}/.rust-cache/rustup"
-        PATH        = "${env.HOME}/.rust-cache/cargo/bin:/usr/local/bin:/usr/bin:/bin"
-        // WORKSPACE is set when the agent is acquired, before any stage runs — safe to reference here.
-        BINARY        = "${WORKSPACE}/target/release/oxide-sloc"
-        // ARTIFACT_PATH exposes the binary location to downstream chained jobs.
-        ARTIFACT_PATH = "${WORKSPACE}/target/release/oxide-sloc"
-        RUST_LOG      = 'warn'
-    }
+    // NOTE: the OS-dependent environment variables (CARGO_HOME, RUSTUP_HOME, PATH,
+    // BINARY, ARTIFACT_PATH, RUST_LOG) are NOT set in a declarative environment{}
+    // block, because that block cannot branch on isUnix() — and the old POSIX-only
+    // PATH ("…/cargo/bin:/usr/local/bin:/usr/bin:/bin") destroyed the inherited
+    // Windows PATH (System32/Git/Python/cargo) on a Windows agent. They are instead
+    // set by h.initEnv() in the "Load helpers" stage below, which:
+    //   * Unix   — sets values BYTE-IDENTICAL to what this block used to set;
+    //   * Windows — PREPENDS the cache cargo/bin dir to the inherited PATH (never
+    //     replaces it), normalises HOME←USERPROFILE, and points BINARY /
+    //     ARTIFACT_PATH at the .exe (POSIX-style path Git Bash accepts).
+    // The persistent Rust toolchain cache lives in the agent user's home so it
+    // survives cleanWs() across builds. One-time setup per agent:
+    //   Docker : rebuild ci/jenkins/Dockerfile.agent (toolchain baked at /opt/rust-toolchain)
+    //   Native : sudo bash ci/jenkins/install-system-deps.sh
+    //            bash ci/jenkins/install-rust-cache.sh
 
     stages {
 
@@ -646,6 +663,11 @@ pipeline {
             steps {
                 script {
                     h = load 'ci/jenkins/pipeline-helpers.groovy'
+                    // Set the OS-aware environment (CARGO_HOME / RUSTUP_HOME / PATH /
+                    // BINARY / ARTIFACT_PATH / RUST_LOG). Must run before Setup and any
+                    // shx() step so cargo/rustc resolve and BINARY carries .exe on
+                    // Windows. See the note above the (removed) environment{} block.
+                    h.initEnv()
                 }
             }
         }
@@ -675,22 +697,25 @@ pipeline {
                 stage('fmt + clippy (parallel)') {
                     parallel {
                         stage('Format') {
-                            steps { sh 'cargo fmt --all -- --check' }
+                            // Wrapped in script{} so the OS-aware shx() helper can
+                            // dispatch to native sh (Linux) or Git Bash (Windows).
+                            steps { script { h.shx 'cargo fmt --all -- --check' } }
                         }
                         stage('Lint') {
                             steps {
-                                // Guard against status-masking shell pipes in
-                                // Jenkins Groovy / ci shell (dash makes `cmd | tail`
-                                // report 0 even on failure). Fast; runs before clippy.
-                                sh 'bash ci/lint-pipeline-shell.sh'
-                                // Single clippy run emitting JSON: it feeds the
-                                // warnings-ng "Warnings" trend view AND still enforces
-                                // -D warnings (we re-raise the failure below, after
-                                // recording, so any issues are visible in the view even
-                                // on a failing build). Matches the repo's lint gate
-                                // (.gitlab-ci.yml, Makefile, ci/lint.sh): plain
-                                // -D warnings, no pedantic/nursery.
-                                sh '''
+                                script {
+                                    // Guard against status-masking shell pipes in
+                                    // Jenkins Groovy / ci shell (dash makes `cmd | tail`
+                                    // report 0 even on failure). Fast; runs before clippy.
+                                    h.shx 'bash ci/lint-pipeline-shell.sh'
+                                    // Single clippy run emitting JSON: it feeds the
+                                    // warnings-ng "Warnings" trend view AND still enforces
+                                    // -D warnings (we re-raise the failure below, after
+                                    // recording, so any issues are visible in the view even
+                                    // on a failing build). Matches the repo's lint gate
+                                    // (.gitlab-ci.yml, Makefile, ci/lint.sh): plain
+                                    // -D warnings, no pedantic/nursery.
+                                    h.shx '''
                                     set +e
                                     cargo clippy --workspace --all-targets --all-features \
                                         --message-format=json \
@@ -700,7 +725,6 @@ pipeline {
                                     echo $? > clippy-rc.txt
                                     cat clippy-stderr.txt   # human-readable diagnostics in the console
                                 '''
-                                script {
                                     // Publish to warnings-ng. Guarded with Throwable so a
                                     // controller WITHOUT the plugin (missing recordIssues /
                                     // cargo step) still passes instead of erroring out.
@@ -739,7 +763,7 @@ pipeline {
         // ── 3. Build ───────────────────────────────────────────────────────────
         stage('Build') {
             steps {
-                retry(2) { sh 'cargo build --release -p oxide-sloc' }
+                retry(2) { script { h.shx 'cargo build --release -p oxide-sloc' } }
             }
         }
 
@@ -776,7 +800,7 @@ pipeline {
         stage('Web UI health check') {
             when { expression { !params.SKIP_WEB_CHECK } }
             steps {
-                sh 'bash ci/jenkins/run-web-check.sh'
+                script { h.shx 'bash ci/jenkins/run-web-check.sh' }
             }
         }
 
@@ -795,7 +819,7 @@ pipeline {
                         script {
                             try {
                                 def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
-                                sh """
+                                h.shx """
                                     '${env.BINARY}' send '${outDir}/result_${env.SLOC_PROJECT ?: 'project'}.json' \\
                                         --webhook-url '${params.WEBHOOK_URL}'
                                 """
@@ -818,7 +842,7 @@ pipeline {
                                 def outDir  = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
                                 def recArgs = params.EMAIL_RECIPIENTS.tokenize(',')
                                     .collect { "--smtp-to '${it.trim()}'" }.join(' ')
-                                sh """
+                                h.shx """
                                     '${env.BINARY}' send '${outDir}/result_${env.SLOC_PROJECT ?: 'project'}.json' \\
                                         --smtp-from "\${SLOC_SMTP_USER}" \\
                                         ${recArgs}
@@ -860,12 +884,14 @@ pipeline {
                 expression { return params.GIT_REF?.trim() != '' }
             }
             steps {
-                withEnv([
-                    "GIT_REF=${params.GIT_REF}",
-                    "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
-                    "SCAN_ROOT=${env.SCAN_ROOT ?: env.WORKSPACE}",
-                ]) {
-                    sh 'bash ci/jenkins/run-git-ref-scan.sh'
+                script {
+                    withEnv([
+                        "GIT_REF=${params.GIT_REF}",
+                        "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
+                        "SCAN_ROOT=${env.SCAN_ROOT ?: env.WORKSPACE}",
+                    ]) {
+                        h.shx 'bash ci/jenkins/run-git-ref-scan.sh'
+                    }
                 }
             }
         }

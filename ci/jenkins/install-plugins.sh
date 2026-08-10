@@ -28,8 +28,16 @@ BASE="${BASE%/}"
 USER_ID="${JENKINS_USER:-}"
 TOKEN="${JENKINS_AUTH_TOKEN:-}"
 
+# Resolve a Python interpreter. Linux ships python3; Git Bash on Windows usually
+# ships python (and the launcher py) but not python3. SLOC_PY overrides.
+if [ -n "${SLOC_PY:-}" ]; then PY="${SLOC_PY}"
+elif command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python  >/dev/null 2>&1; then PY=python
+elif command -v py      >/dev/null 2>&1; then PY=py
+else PY=python3; fi   # best-effort: not-found path already tolerated (|| true / || echo "")
+
 read_key() {  # read_key <json-key>  (scalar)
-    python3 - "$CAPS" "$1" <<'PY' 2>/dev/null || echo ""
+    "${PY}" - "$CAPS" "$1" <<'PY' 2>/dev/null || echo ""
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -40,7 +48,7 @@ PY
 }
 
 read_list() {  # read_list <json-key>  (space-separated)
-    python3 - "$CAPS" "$1" <<'PY' 2>/dev/null || true
+    "${PY}" - "$CAPS" "$1" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -110,7 +118,7 @@ installed_shortnames() {
     body="$(curl -fsS -g ${USER_ID:+-u "${USER_ID}:${TOKEN}"} \
         "${BASE}/pluginManager/api/json?depth=1&tree=plugins[shortName]" 2>/dev/null || true)"
     [ -z "${body}" ] && return 0
-    printf '%s' "${body}" | python3 -c 'import json,sys
+    printf '%s' "${body}" | "${PY}" -c 'import json,sys
 try:
     d = json.load(sys.stdin)
     print(" ".join(p.get("shortName", "") for p in d.get("plugins", [])))
@@ -149,7 +157,7 @@ for name in "${PLUGINS[@]}"; do
 done
 
 # Record what we installed back into capabilities.json (best-effort).
-python3 - "${CAPS}" "${installed[@]:-}" <<'PY' 2>/dev/null || true
+"${PY}" - "${CAPS}" "${installed[@]:-}" <<'PY' 2>/dev/null || true
 import json, sys
 path = sys.argv[1]
 names = [n for n in sys.argv[2:] if n]
