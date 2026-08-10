@@ -317,20 +317,31 @@ If using Bitbucket as the SCM:
 | Password | A Bitbucket app password with repo-read scope |
 | ID | `bitbucket-credentials` |
 
-### 5g. Jenkins API token (optional — in-pipeline CSP relaxation)
+### 5g. Jenkins API token (fully optional — in-pipeline CSP relaxation)
 
-The Setup stage attempts to relax the artifact-viewer Content Security Policy via
-`System.setProperty` (requires "Use Groovy Sandbox" to be **unchecked** in the job
-config) and, as a fallback, via the Jenkins Script Console REST API.  The REST API
-path requires an admin API token bound as a Jenkins credential:
+> **TL;DR — you almost certainly do not need this credential.** The pipeline runs
+> fine WITHOUT `jenkins-api-token` and WITHOUT any CSP relaxation. HTML reports
+> still render: `ci/jenkins/extract-report-assets.py` externalises the report's
+> inline CSS/JS so it renders under Jenkins' default CSP, and modern Jenkins
+> (2.387.x+) serves the CSP report-only (non-blocking). For corporate / locked-down
+> controllers, the recommended fix for the interactive artifact viewer is the
+> credential-free `init.groovy.d/relax-csp.groovy` approach in
+> [Step 6](#6-configure-the-csp-header-html-report-viewer) — see also the
+> [Corporate / locked-down Jenkins](#corporate--locked-down-jenkins) section.
 
-**Important — sandbox is ON by default for SCM-defined pipelines.** When a Pipeline
-job pulls its `Jenkinsfile` from SCM, Jenkins enforces the Groovy sandbox by default.
-With the sandbox active, the in-pipeline `System.setProperty` call is always blocked
-("Direct CSP set blocked (sandbox active)"), so the REST API fallback becomes the only
-in-pipeline path available.  This makes the `jenkins-api-token` credential **effectively
-required** on a fresh install (on older Jenkins you could instead disable the sandbox — see
-the note below on why that no longer works).
+The Setup stage *optionally* relaxes the artifact-viewer Content Security Policy via
+`System.setProperty` (works only when "Use Groovy Sandbox" is **unchecked**) and, as a
+fallback, via the Jenkins Script Console REST API. The REST API path uses an admin API
+token bound as a Jenkins credential — but it is entirely optional:
+
+**Sandbox is ON by default for SCM-defined pipelines.** When a Pipeline job pulls its
+`Jenkinsfile` from SCM, Jenkins enforces the Groovy sandbox by default, so the
+in-pipeline `System.setProperty` call cannot apply the CSP. When both the direct set
+and the API path are unavailable, the Setup stage now logs a **single calm INFO line**
+("CSP auto-relax skipped … This is OPTIONAL and non-fatal — HTML reports still render …")
+rather than an alarming caught-exception dump. Nothing fails; only the interactive
+artifact-viewer styling on very old controllers is affected. The permanent, sandbox-proof
+fix is `init.groovy.d/relax-csp.groovy` (no credential needed).
 
 On `workflow-cps` versions that still honor it, `<sandbox>false</sandbox>` in
 `ci/jenkins/job-config.xml` and `ci/jenkins/job-config.xml.tmpl` disables the sandbox.
@@ -349,18 +360,19 @@ no credential.
 | Secret | Your Jenkins admin API token — see `ci/jenkins/README.md § Minting a long-lived API token` |
 | ID | `jenkins-api-token` |
 
-Without this credential and with the Groovy sandbox enabled, the pipeline falls back
-silently — the in-pipeline CSP relaxation is skipped.  On current Jenkins LTS
-(2.387.x+) this has no visible effect because the default header is already
-`Content-Security-Policy-Report-Only` (non-blocking) and reports render correctly
-regardless.  On older Jenkins (pre-2.387.x), missing CSP relaxation causes broken
-interactive features — deploy the init script in [Step 6](#6-configure-the-csp-header-html-report-viewer)
-as the permanent fix.
+Without this credential and with the Groovy sandbox enabled, the pipeline emits one
+calm INFO line and carries on — the in-pipeline CSP relaxation is simply skipped.
+On current Jenkins LTS (2.387.x+) this has no visible effect because the default header
+is already `Content-Security-Policy-Report-Only` (non-blocking) and reports render
+correctly regardless. On older Jenkins (pre-2.387.x), missing CSP relaxation only
+affects the interactive artifact viewer — deploy the init script in
+[Step 6](#6-configure-the-csp-header-html-report-viewer) as the permanent fix.
 
 > **Credential fallback behavior:** the `jenkins-api-token` binding is wrapped in a
 > `try/catch` — not `optional: true`, which is unsupported in credentials-binding 719.x
-> and generates "Unknown parameter" log noise.  A missing credential is handled
-> gracefully with a logged message; the build does not fail.
+> and generates "Unknown parameter" log noise.  A missing credential is detected as
+> the expected "credentials entry … not found" path and handled quietly (no raw
+> exception is printed); the build never fails on account of it.
 
 ---
 
@@ -436,6 +448,38 @@ On **pre-2.387.x Jenkins** this step is required — the default CSP was an enfo
 > report (CSS loads, but JS is blocked).
 > The `preflight.sh` script also supports `bash ci/jenkins/preflight.sh --install-csp`
 > (requires Docker on the Jenkins host) to deploy the init script and restart automatically.
+
+### Corporate / locked-down Jenkins
+
+On a hardened controller (Groovy sandbox enforced, no admin API token handed out,
+restricted plugins), the pipeline is designed to run cleanly with **no special
+configuration**. Key points:
+
+- **The Groovy sandbox is always on for SCM-defined pipelines** on modern
+  `workflow-cps` (3900+, incl. Jenkins 2.555.x). There is no `<sandbox>false</sandbox>`
+  escape and no web-UI toggle — the direct `System.setProperty` CSP path simply cannot
+  apply. This is expected and handled quietly.
+- **`jenkins-api-token` is OPTIONAL.** Omit it. The Setup stage detects the missing
+  credential as the normal path and prints one calm INFO line instead of an error. The
+  build never fails for lack of it.
+- **CSP relaxation is OPTIONAL.** HTML reports render under the default CSP because
+  `ci/jenkins/extract-report-assets.py` externalises the report's inline CSS/JS, and
+  modern Jenkins serves CSP report-only (non-blocking). You lose nothing but interactive
+  artifact-viewer styling on very old (pre-2.387.x) controllers.
+- **Permanent, credential-free, sandbox-proof CSP fix (recommended default):** drop
+  `ci/jenkins/init.groovy.d/relax-csp.groovy` into `$JENKINS_HOME/init.groovy.d/` and
+  restart (see the step-by-step above), or run
+  `bash ci/jenkins/preflight.sh --install-csp` on the Jenkins host. This is the
+  recommended approach for corporate/sandboxed controllers — it needs no credential and
+  survives restarts.
+- **Windows agents need a POSIX shell.** Every stage runs POSIX `.sh` scripts. On a
+  Linux agent they run natively; on a **Windows agent** the pipeline runs them through
+  **Git Bash** (`bash.exe` from Git for Windows, which also provides `curl`, `tar`,
+  `grep`, `awk`, `sha256sum`). Install Git for Windows on the agent, or set the
+  `SLOC_BASH` environment variable to a `bash.exe` path. The WSL `System32\bash.exe`
+  launcher is intentionally **not** used. To avoid the Git-Bash requirement entirely on
+  a mixed Windows/Linux controller, set the **`AGENT_LABEL`** build parameter to a Linux
+  node label so the job is pinned to Linux.
 
 ---
 

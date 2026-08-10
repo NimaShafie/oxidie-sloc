@@ -3,7 +3,15 @@
      __REPO_BRANCH__ tokens must be substituted before import. Do NOT import as-is.
        JOB_XML=$(bash ci/jenkins/render-job-config.sh)   # reads REPO_URL / REPO_BRANCH
      No internet URL is baked in, so this is safe to keep in an air-gapped clone.
-     Bootstrap: see ci/jenkins/README.md -->
+     Bootstrap: see ci/jenkins/README.md
+
+     Build parameters (including AGENT_LABEL, which pins the job to a node — set it
+     to a Linux label to avoid the Windows Git-Bash requirement) are NOT enumerated
+     here. A Pipeline-from-SCM job DISCOVERS its parameters from the parameters{}
+     block in the Jenkinsfile on the FIRST build. Run one unparameterized build to
+     seed the form; from build #2 the full "Build with Parameters" form appears.
+     Do not duplicate the parameter list here — the Jenkinsfile is the single
+     source of truth. -->
 <flow-definition plugin="workflow-job">
   <description>oxide-sloc — SLOC analysis pipeline. Scans source repositories and produces HTML, JSON, and PDF reports with build-over-build trend data.</description>
   <keepDependencies>false</keepDependencies>

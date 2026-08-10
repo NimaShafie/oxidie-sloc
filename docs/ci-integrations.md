@@ -491,22 +491,39 @@ The build description on each run is also set automatically, e.g.: `code=4821  f
 
 #### Setting the artifact-viewer CSP
 
-From Jenkins 2.387.x LTS onward (including the current 2.555.x series), the artifact viewer
-serves a `Content-Security-Policy-Report-Only` header — non-blocking — so the oxide-sloc HTML
-report renders correctly on a current install without any CSP changes.
+**The pipeline runs fine WITHOUT any CSP relaxation and WITHOUT the `jenkins-api-token`
+credential.** The published HTML report renders under Jenkins' default CSP because
+`ci/jenkins/extract-report-assets.py` externalises the report's inline CSS/JS into
+sidecar files, and from Jenkins 2.387.x LTS onward (including the 2.555.x series) the
+artifact viewer serves a `Content-Security-Policy-Report-Only` header — non-blocking.
+CSP relaxation only affects the interactive artifact-viewer styling on very old
+(pre-2.387.x) controllers, where the default CSP was enforcing and blocked inline scripts.
 
-On **pre-2.387.x Jenkins**, the default CSP was enforcing and blocked inline scripts, making
-this step required.  Deploying the init script is still recommended for all setups as a
-preventive measure against future policy changes.
+When the in-pipeline relaxation cannot apply (Groovy sandbox active — the default for
+SCM-defined pipelines — and no `jenkins-api-token`), the Setup stage logs a single calm
+INFO line and continues. Nothing fails.
 
-The recommended approach is to drop `ci/jenkins/init.groovy.d/relax-csp.groovy` into `$JENKINS_HOME/init.groovy.d/` before starting Jenkins:
+**Recommended default for corporate / locked-down / sandboxed controllers:** drop the
+credential-free, sandbox-proof init script `ci/jenkins/init.groovy.d/relax-csp.groovy`
+into `$JENKINS_HOME/init.groovy.d/` before starting Jenkins:
 
 ```bash
 cp ci/jenkins/init.groovy.d/relax-csp.groovy $JENKINS_HOME/init.groovy.d/
 # Then restart Jenkins.
 ```
 
-This sets the CSP property at startup without requiring in-process script approval. For external origins (GitHub Pages, S3), control the `Content-Security-Policy` response header directly on that service instead.
+This sets the CSP property at startup without requiring in-process script approval, a
+credential, or a disabled sandbox. On the Jenkins host you can also run
+`bash ci/jenkins/preflight.sh --install-csp` to deploy it and restart automatically.
+For external origins (GitHub Pages, S3), control the `Content-Security-Policy` response
+header directly on that service instead.
+
+> **Windows agents:** every stage runs POSIX `.sh` scripts. On a Linux agent they run
+> natively; on a **Windows agent** the pipeline runs them through **Git Bash** — install
+> Git for Windows (provides `bash.exe` + `curl`/`tar`/`grep`/`awk`/`sha256sum`), or set
+> the `SLOC_BASH` env var to a `bash.exe` path. The WSL `System32\bash.exe` launcher is
+> not used. Pin the job to a Linux node with the **`AGENT_LABEL`** build parameter to
+> avoid the Git-Bash requirement on a mixed Windows/Linux controller.
 
 #### Adapting to your own project
 

@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Static guards for the Windows-agent portability wiring (Problem 1).
+
+These lock in the cross-platform shell dispatch and OS-aware environment so they
+cannot silently regress during unrelated CI edits. They are static (no live
+Jenkins / no Groovy compiler needed) but cover the load-bearing invariants:
+
+  pipeline-helpers.groovy
+    * resolveBash() exists, returns null on Unix, skips the WSL System32 shim,
+      honours SLOC_BASH, and probes the known Git-for-Windows locations.
+    * shx()/shxStdout()/shxStatus() exist and DO NOT use the fragile
+      `bash -lc "<inline>"` form — they must write a temp .sh script and run it
+      by path, normalising CRLF to LF.
+    * initEnv() sets Unix values byte-identical to the old environment{} block,
+      and on Windows PREPENDS the cache bin dir to the inherited PATH (never
+      replaces it), normalises HOME<-USERPROFILE, and points BINARY/ARTIFACT_PATH
+      at the .exe.
+    * pyBin() provides a python3 -> python -> py (SLOC_PY override) fallback.
+    * EVERY shell step goes through shx/shxStdout/shxStatus — no bare `sh '...'`
+      / `sh("...")` call sites remain (the three inside the helper definitions
+      themselves are the Unix branch and are allowed).
+
+  Jenkinsfile
+    * agent honours params.AGENT_LABEL; the AGENT_LABEL parameter exists.
+    * no OS-dependent vars remain in a declarative environment{} block (they
+      moved to initEnv()); h.initEnv() is invoked.
+    * no bare `sh` steps remain — all dispatch via h.shx / h.shxStdout / etc.
+
+Run:  python3 ci/jenkins/tests/test-windows-agent-dispatch.py
+Exit code 0 = all guards hold.
+"""
+
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+HELPERS = os.path.join(ROOT, "ci", "jenkins", "pipeline-helpers.groovy")
+JENKINSFILE = os.path.join(ROOT, "Jenkinsfile")
+
+RESULTS = []
+
+
+def check(name, cond, detail=""):
+    RESULTS.append((name, bool(cond), detail))
+
+
+def read(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def strip_line_comments(src):
+    """Drop /* */ block comments and // line comments so call-site scans don't
+    trip on prose. Coarse but sufficient: our positive checks look for code
+    tokens and the negative `sh` scan runs against this stripped text. Newlines
+    inside block comments are preserved so reported line numbers stay accurate."""
+    # Strip /* ... */ block comments, preserving newline count for line numbers.
+    def _blank(m):
+        return "".join(ch if ch == "\n" else " " for ch in m.group(0))
+    src = re.sub(r"/\*.*?\*/", _blank, src, flags=re.DOTALL)
+    out = []
+    for line in src.splitlines():
+        idx = line.find("//")
+        out.append(line[:idx] if idx != -1 else line)
+    return "\n".join(out)
+
+
+def test_helpers():
+    src = read(HELPERS)
+    code = strip_line_comments(src)
+
+    check("helpers: resolveBash() defined", "def resolveBash()" in src)
+    check("helpers: resolveBash returns null on Unix",
+          re.search(r"def resolveBash\(\)\s*\{\s*if \(isUnix\(\)\)\s*\{\s*return null",
+                    src) is not None)
+    check("helpers: resolveBash honours SLOC_BASH override",
+          "env.SLOC_BASH" in src)
+    check("helpers: resolveBash skips the WSL System32 shim",
+          "system32" in src.lower() and "where bash" in src.lower())
+    check("helpers: resolveBash probes known Git-for-Windows paths",
+          r"Program Files\\Git\\bin\\bash.exe" in src
+          or r"Program Files\\Git\\usr\\bin\\bash.exe" in src)
+
+    check("helpers: shx() defined", "def shx(String cmd)" in src)
+    check("helpers: shxStdout() defined", "def shxStdout(String cmd)" in src)
+    check("helpers: shxStatus() defined", "def shxStatus(String cmd)" in src)
+    check("helpers: noBashError() actionable message mentions AGENT_LABEL / SLOC_BASH",
+          "AGENT_LABEL" in src and "SLOC_BASH" in src)
+
+    # CRITICAL: shx must NOT use the fragile `bash -lc "<inline>"` form. Scan the
+    # comment-stripped code for an actual invocation (`-lc "` / `-lc \"`), so the
+    # header comment that *documents* the ban does not trip the guard.
+    lc_hits = re.findall(r'-lc\s*[\\"]', code)
+    check("helpers: shx does NOT use `bash -lc` inline form",
+          not lc_hits,
+          "found a `-lc \"...\"` invocation — must write a temp script and run by path")
+    # shx must write a temp script (writeFile) and run it by path.
+    check("helpers: shx writes a temp script via writeFile",
+          "writeFile" in src and "writeShxScript" in src)
+    check("helpers: temp-script uniqueness derived from a counter + BUILD_NUMBER",
+          "shxCounter" in src and "BUILD_NUMBER" in src)
+    check("helpers: temp-script CRLF normalised to LF before writeFile",
+          ".replace('\\r\\n', '\\n')" in src or ".replace('\\r', '\\n')" in src)
+    check("helpers: temp-script cleaned up in a finally",
+          "finally" in src and "del /q" in src)
+
+    check("helpers: initEnv() defined", "def initEnv()" in src)
+    # Unix values must be byte-identical to the old environment{} block.
+    check("helpers: initEnv Unix PATH byte-identical to old environment block",
+          '"${home}/.rust-cache/cargo/bin:/usr/local/bin:/usr/bin:/bin"' in src)
+    check("helpers: initEnv Unix BINARY has no .exe",
+          '"${env.WORKSPACE}/target/release/oxide-sloc"' in src)
+    # Windows PATH must PREPEND, not replace, the inherited PATH.
+    check("helpers: initEnv Windows PREPENDS cache bin to inherited PATH",
+          re.search(r"env\.PATH\s*=\s*\"\$\{home\}\\\\\.rust-cache\\\\cargo\\\\bin;\$\{env\.PATH\}\"",
+                    src) is not None,
+          "Windows PATH must be '<cache>;${env.PATH}' (prepend, keep inherited)")
+    check("helpers: initEnv normalises HOME<-USERPROFILE on Windows",
+          "env.USERPROFILE" in src)
+    check("helpers: initEnv Windows BINARY carries .exe",
+          "oxide-sloc.exe" in src)
+
+    check("helpers: pyBin() defined with python3->python->py fallback",
+          "def pyBin()" in src and "command -v python3" in src
+          and "command -v python " in src and "command -v py" in src)
+    check("helpers: pyBin honours SLOC_PY override", "env.SLOC_PY" in src)
+
+    # No bare `sh` call sites outside the helper definitions. The only allowed
+    # `sh`/`sh(` tokens are the Unix branch inside shx/shxStdout/shxStatus.
+    bare = []
+    for i, line in enumerate(code.splitlines(), 1):
+        s = line.strip()
+        if s == "sh cmd":
+            continue  # shx() Unix branch
+        if s.startswith("return sh(returnStdout: true, script: cmd)"):
+            continue  # shxStdout() Unix branch
+        if s.startswith("return sh(returnStatus: true, script: cmd)"):
+            continue  # shxStatus() Unix branch
+        if re.search(r"(^|[^\w.])sh\s+['\"]", line) or re.search(r"(^|[^\w.])sh\s*\(", line):
+            bare.append((i, s))
+    check("helpers: no bare `sh` call sites remain (all via shx/shxStdout/shxStatus)",
+          not bare,
+          "; ".join(f"L{n}:{t[:50]}" for n, t in bare))
+
+    # No hardcoded `python3 ci/` invocations — those must go through pyBin().
+    py_hardcodes = [(i, l.strip()) for i, l in enumerate(code.splitlines(), 1)
+                    if "python3 ci/" in l]
+    check("helpers: no hardcoded `python3 ci/...` (all via ${pyBin()})",
+          not py_hardcodes,
+          "; ".join(f"L{n}" for n, _ in py_hardcodes))
+
+
+def test_jenkinsfile():
+    src = read(JENKINSFILE)
+    code = strip_line_comments(src)
+
+    check("Jenkinsfile: AGENT_LABEL parameter exists",
+          re.search(r"name:\s*'AGENT_LABEL'", src) is not None)
+    check("Jenkinsfile: agent honours params.AGENT_LABEL",
+          re.search(r"agent\s*\{\s*label\s+\"\$\{params\.AGENT_LABEL", src) is not None)
+
+    # The old OS-dependent environment{} vars must be gone (moved to initEnv()).
+    check("Jenkinsfile: no POSIX-only PATH in a declarative environment block",
+          "/usr/local/bin:/usr/bin:/bin" not in code,
+          "the OS-dependent PATH must live in initEnv(), not environment{}")
+    check("Jenkinsfile: CARGO_HOME no longer set in environment{}",
+          not re.search(r"^\s*CARGO_HOME\s*=", code, re.MULTILINE))
+    check("Jenkinsfile: h.initEnv() is invoked", "h.initEnv()" in src)
+
+    # No bare `sh` steps — everything dispatches through the helper.
+    bare = [(i, l.strip()) for i, l in enumerate(code.splitlines(), 1)
+            if re.search(r"(^|[^\w.])sh\s+['\"]", l) or re.search(r"(^|[^\w.])sh\s*\(", l)]
+    check("Jenkinsfile: no bare `sh` steps remain (all via h.shx/h.shxStdout/etc.)",
+          not bare,
+          "; ".join(f"L{n}:{t[:50]}" for n, t in bare))
+
+
+def main():
+    test_helpers()
+    test_jenkinsfile()
+
+    print("=" * 82)
+    print("Jenkins Windows-agent portability guards (resolveBash / shx / initEnv)")
+    print("=" * 82)
+    all_ok = True
+    for name, ok, detail in RESULTS:
+        all_ok = all_ok and ok
+        line = f"[{'PASS' if ok else 'FAIL'}] {name}"
+        if not ok and detail:
+            line += f"\n        {detail}"
+        print(line)
+    print("-" * 82)
+    print("OVERALL:", "ALL PASSED" if all_ok else "SOME FAILED")
+    sys.exit(0 if all_ok else 1)
+
+
+if __name__ == "__main__":
+    main()

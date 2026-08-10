@@ -47,6 +47,14 @@ NAME="${BUILD_NAME:-oxide-sloc CI}"
 URL="${REPORT_URL:-${BUILD_URL:-}}"
 DESC="${BUILD_DESCRIPTION:-oxide-sloc code metrics report}"
 
+# Resolve a Python interpreter (Linux: python3; Git Bash on Windows: python/py).
+# SLOC_PY overrides. Falls back to python3 so the "missing?" note still fires.
+if   [ -n "${SLOC_PY:-}" ];                   then PY="${SLOC_PY}"
+elif command -v python3 >/dev/null 2>&1;      then PY=python3
+elif command -v python  >/dev/null 2>&1;      then PY=python
+elif command -v py      >/dev/null 2>&1;      then PY=py
+else PY=python3; fi
+
 if [ -z "${BASE}" ] || [ -z "${TOKEN}" ] || [ -z "${SHA}" ]; then
     echo "notify-bitbucket: not configured (need BITBUCKET_BASE_URL, BITBUCKET_TOKEN, GIT_COMMIT) — skipping."
     exit 0
@@ -80,7 +88,7 @@ fi
 payload=$(
     SLOC_STATE="${STATE}" SLOC_KEY="${KEY}" SLOC_NAME="${NAME}" \
     SLOC_URL="${URL}" SLOC_DESC="${DESC}" \
-    python3 -c 'import json, os; print(json.dumps({
+    "${PY}" -c 'import json, os; print(json.dumps({
         "state":       os.environ["SLOC_STATE"],
         "key":         os.environ["SLOC_KEY"],
         "name":        os.environ["SLOC_NAME"],

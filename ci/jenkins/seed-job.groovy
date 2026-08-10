@@ -26,6 +26,14 @@
 //   Air-gapped? Use your local mirror, e.g. file:///srv/git/oxide-sloc.git or
 //   https://git.internal.example/oxide-sloc/oxide-sloc.git — never the public github.com URL.
 // Repo branch: optional; defaults to */main. Override via REPO_BRANCH (param or env).
+//
+// Build parameters: this seed defines a Pipeline-from-SCM (cpsScm) job, so the
+// job's build parameters — including AGENT_LABEL, which pins the build to a node
+// (set it to a Linux label to avoid the Windows Git-Bash requirement) — are
+// DISCOVERED from the Jenkinsfile parameters{} block on the first build. They are
+// intentionally NOT declared here; the Jenkinsfile is the single source of truth.
+// Run the generated job once with no parameters to seed the "Build with
+// Parameters" form; the full form appears from build #2 onward.
 
 def jobName = (binding.hasVariable('JOB_NAME') ? JOB_NAME : System.getenv('JOB_NAME')) ?: 'oxide-sloc'
 def repoUrl = (binding.hasVariable('REPO_URL') ? REPO_URL : System.getenv('REPO_URL')) ?: ''
