@@ -25,7 +25,9 @@
 //   - Script Console: set an env var or pass a binding variable.
 //   Air-gapped? Use your local mirror, e.g. file:///srv/git/oxide-sloc.git or
 //   https://git.internal.example/oxide-sloc/oxide-sloc.git — never the public github.com URL.
-// Repo branch: optional; defaults to */main. Override via REPO_BRANCH (param or env).
+// Repo branch: optional; defaults to the concrete ref `main`. Override via REPO_BRANCH
+// (param or env). Use a concrete ref, NOT the wildcard */main — lightweight (jgit)
+// checkout resolves via findRef() and NPEs on a wildcard at Jenkinsfile load.
 //
 // Build parameters: this seed defines a Pipeline-from-SCM (cpsScm) job, so the
 // job's build parameters — including AGENT_LABEL, which pins the build to a node
@@ -38,7 +40,7 @@
 def jobName = (binding.hasVariable('JOB_NAME') ? JOB_NAME : System.getenv('JOB_NAME')) ?: 'oxide-sloc'
 def repoUrl = (binding.hasVariable('REPO_URL') ? REPO_URL : System.getenv('REPO_URL')) ?: ''
 def repoBranch = (binding.hasVariable('REPO_BRANCH') ? REPO_BRANCH : System.getenv('REPO_BRANCH')) \
-                 ?: '*/main'
+                 ?: 'main'
 
 if (!repoUrl?.trim()) {
     throw new IllegalStateException(

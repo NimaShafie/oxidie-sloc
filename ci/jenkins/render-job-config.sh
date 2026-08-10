@@ -26,9 +26,12 @@ if [ -z "${REPO_URL:-}" ]; then
     exit 1
 fi
 
-# Branch/ref spec for the pipeline SCM checkout. Defaults to */main; override for forks
-# tracking a different branch or a pinned tag.
-REPO_BRANCH="${REPO_BRANCH:-*/main}"
+# Branch/ref spec for the pipeline SCM checkout. Defaults to a CONCRETE ref (main),
+# not the wildcard */main: the jgit-based lightweight checkout resolves the branch via
+# Repository.findRef(), which returns null for a wildcard and NPEs at Jenkinsfile load.
+# A concrete ref works for both lightweight (jgit) and heavyweight (git-plugin) checkout.
+# Override for forks tracking a different branch or a pinned tag.
+REPO_BRANCH="${REPO_BRANCH:-main}"
 
 OUT="$(mktemp -t oxide-sloc-job.XXXXXX.xml)"
 sed -e "s|__REPO_URL__|${REPO_URL}|g" \

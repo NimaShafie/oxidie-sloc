@@ -93,6 +93,14 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          # Pin to cosign v2.x: cosign-installer v4 defaults to installing cosign v3, which
+          # defaults to OCI 1.1 referrers-based signature discovery. GHCR returns DENIED (not
+          # 404) for a missing/inaccessible referrer tag, which trips `cosign verify` even
+          # though `cosign sign` succeeded. cosign v2 uses tag-based signature storage for both
+          # sign and verify — the convention GHCR reliably supports — so keeping both steps on
+          # v2 keeps signing and verification on the same GHCR-compatible discovery path.
+          cosign-release: 'v2.6.5'
 
       - name: Sign image with cosign (keyless via GitHub OIDC)
         env:

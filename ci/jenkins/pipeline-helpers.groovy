@@ -259,30 +259,25 @@ def runSetup() {
     //   * extract-report-assets.py externalises the report's inline CSS/JS so the
     //     HTML report renders under Jenkins' DEFAULT CSP with no relaxation, and
     //   * modern Jenkins (2.387.x+) serves CSP report-only (non-blocking).
-    // So this whole block is best-effort and NEVER fails the build. Three tiers,
-    // in order of preference:
-    //   1. Direct System.setProperty  — works only when the Groovy sandbox is off
-    //   2. Script Console REST API     — needs the OPTIONAL 'jenkins-api-token'
-    //   3. init.groovy.d/relax-csp.groovy — the permanent, credential-free,
+    // So this whole block is best-effort and NEVER fails the build. One in-pipeline
+    // tier, then the permanent out-of-band fix, in order of preference:
+    //   1. Script Console REST API     — needs the OPTIONAL 'jenkins-api-token'
+    //   2. init.groovy.d/relax-csp.groovy — the permanent, credential-free,
     //      sandbox-proof fix (bash ci/jenkins/preflight.sh --install-csp)
+    //
+    // A direct in-pipeline System.setProperty is deliberately NOT attempted. A
+    // Pipeline-from-SCM job is always Groovy-sandboxed (see job-config.xml), so the
+    // static call is rejected AND the script-security plugin logs its own alarming
+    // "Scripts not permitted to use staticMethod java.lang.System setProperty" line
+    // at the point of rejection — which a surrounding try/catch canNOT suppress. That
+    // noise would appear on 100% of runs for zero benefit. The sandbox-OFF niche
+    // where a direct set would actually work is covered by the init.groovy.d tier.
     def RELAXED_CSP = "default-src 'self'; style-src 'self' 'unsafe-inline'; " +
                       "img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; " +
                       "font-src 'self' data:;"
     def cspSet = false
 
-    // Tier 1 — direct set. Succeeds when the sandbox is disabled; when the
-    // sandbox is active this throws a RejectedAccessException. That is the NORMAL,
-    // expected state on a Pipeline-from-SCM job, so treat it as such: no alarming
-    // exception dump — we simply fall through to the calm summary below.
-    try {
-        System.setProperty('hudson.model.DirectoryBrowserSupport.CSP', RELAXED_CSP)
-        echo 'Artifact-viewer CSP relaxed (direct System.setProperty).'
-        cspSet = true
-    } catch (Throwable ignore) {
-        // Sandbox active (the common case) — handled by Tier 2 / the summary below.
-    }
-
-    // Tier 2 — Script Console REST API, using the OPTIONAL 'jenkins-api-token'
+    // Tier 1 — Script Console REST API, using the OPTIONAL 'jenkins-api-token'
     // credential. A missing credential is the EXPECTED path, not an error: the
     // withCredentials binding throws "credentials entry ... not found" when the
     // token is absent, which we classify as the quiet path and route to the calm
@@ -350,7 +345,7 @@ def runSetup() {
         }
     }
 
-    // Single, calm INFO summary when neither in-pipeline tier applied the CSP.
+    // Single, calm INFO summary when the in-pipeline API tier did not apply the CSP.
     // This is expected on a sandboxed Pipeline-from-SCM job with no api token —
     // it is optional and non-fatal, so say so plainly (no exception dump).
     if (!cspSet) {
