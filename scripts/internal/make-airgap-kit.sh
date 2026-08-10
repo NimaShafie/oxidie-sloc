@@ -9,7 +9,7 @@
 #   - Rust standalone installer  (rustc, cargo, std — pinned to rust-toolchain.toml)
 #   - musl Rust target stdlib    (for the static-binary target)
 #   - musl C toolchain           (musl-gcc + headers from musl.cc — no system libc deps)
-#   - Rust crate vendor sources  (vendor.tar.xz — all ~328 crates, offline cargo build)
+#   - Rust crate vendor sources  (vendor.tar.gz.* split parts — all ~328 crates, offline cargo build)
 #   - oxide-sloc source archive
 #   - Self-contained install.sh  (extracts toolchains, vendors, builds — no internet)
 #
@@ -105,8 +105,8 @@ fetch() {
 
 echo "==> Generating vendor archive (cargo vendor)..."
 bash scripts/internal/update-vendor.sh
-cp vendor.tar.xz        "$KIT_DIR/vendor.tar.xz"
-cp vendor.tar.xz.sha256 "$KIT_DIR/vendor.tar.xz.sha256"
+cp vendor.tar.gz.*          "$KIT_DIR/"
+cp vendor.checksums.sha256  "$KIT_DIR/vendor.checksums.sha256"
 
 # ── Step 2: Source archive ───────────────────────────────────────────────────
 
@@ -143,7 +143,7 @@ cat > "${KIT_DIR}/install.sh" << 'INNER_INSTALL'
 # oxide-sloc offline build installer
 # Run this on the air-gapped machine after extracting the kit archive.
 #
-# Requirements: bash, tar (with xz support), sha256sum
+# Requirements: bash, tar, gzip, sha256sum
 # Internet access: NOT required.
 # System compiler: NOT required (bundled musl-gcc is used).
 #
@@ -267,8 +267,8 @@ mkdir -p "$BUILD_DIR"
 tar xzf "$KIT_DIR/oxide-sloc-src.tar.gz" -C "$BUILD_DIR"
 
 echo "==> Verifying and extracting vendor sources..."
-sha256sum -c "$KIT_DIR/vendor.tar.xz.sha256" --quiet
-tar -xJf "$KIT_DIR/vendor.tar.xz" -C "$BUILD_DIR"
+( cd "$KIT_DIR" && sha256sum -c vendor.checksums.sha256 --quiet )
+cat "$KIT_DIR"/vendor.tar.gz.* | tar -xzf - -C "$BUILD_DIR"
 
 # ── 6. Configure cargo for offline vendored build ─────────────────────────────
 
@@ -357,7 +357,7 @@ WHAT'S INCLUDED
   Rust toolchain   rust-${RUST_DL_VERSION}-${RUST_HOST_TARGET}
   musl Rust std    rust-std-${RUST_DL_VERSION}-${RUST_MUSL_TARGET}
   musl C toolchain ${MUSL_CC_ARCHIVE}  (musl-gcc, headers, libc)
-  Crate sources    vendor.tar.xz  (~328 crates, no crates.io access needed)
+  Crate sources    vendor.tar.gz.*  (split parts, ~328 crates, no crates.io access needed)
   Source code      oxide-sloc-src.tar.gz
 
 QUICK START (air-gapped machine, no internet, no pre-installed tools)
@@ -384,14 +384,14 @@ RUNTIME REQUIREMENTS AFTER BUILDING
 
 SYSTEM REQUIREMENTS FOR BUILDING
   OS:        Linux ${PLATFORM_LABEL}
-  Tools:     bash, tar (with xz/J support), sha256sum
+  Tools:     bash, tar, gzip, sha256sum
   Root:      NOT required (installs to .tools/ inside this directory)
   Internet:  NOT required
 
 TROUBLESHOOTING
-  "xz: command not found" or "tar: invalid option -- 'J'":
-    Install xz-utils (Debian/Ubuntu: apt-get install xz-utils)
-    or liblzma (RHEL/Rocky: yum install xz)
+  "gzip: command not found":
+    Install gzip (should be present on any Linux system;
+    Debian/Ubuntu: apt-get install gzip / RHEL/Rocky: yum install gzip).
 
   "sha256sum: command not found":
     Install coreutils (should be present on any Linux system).

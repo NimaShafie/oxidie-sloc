@@ -10,7 +10,7 @@ cargo build --workspace          # debug build (all 8 crates)
 cargo build --release -p oxide-sloc  # release CLI binary
 ```
 
-Requires Rust 1.95+. Vendored dependencies are in `vendor/` (extracted from `vendor.tar.xz`).
+Requires Rust 1.95+. Vendored dependencies are in `vendor/` (reassembled + extracted from the split gzip parts `vendor.tar.gz.*`).
 `.cargo/config.toml` redirects crate-io lookups to `vendor/` for offline builds.
 
 CI gates (must all pass):

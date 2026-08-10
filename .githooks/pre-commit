@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pre-commit hook: warns when Cargo.toml or Cargo.lock is staged without a
-# corresponding update to vendor.tar.xz.
+# corresponding update to the vendor archive (vendor.tar.gz.* + vendor.checksums.sha256).
 #
 # This is a warning-only hook — it never blocks the commit.
 # The vendor-sync job in ci.yml will fail the build if there is a real mismatch.
@@ -9,7 +9,7 @@
 # (or run: bash scripts/internal/install-hooks.sh)
 
 CARGO_CHANGED=$(git diff --cached --name-only 2>/dev/null | grep -E 'Cargo\.(toml|lock)$' || true)
-VENDOR_CHANGED=$(git diff --cached --name-only 2>/dev/null | grep -E 'vendor\.tar\.xz(\.sha256)?$' || true)
+VENDOR_CHANGED=$(git diff --cached --name-only 2>/dev/null | grep -E 'vendor\.tar\.gz\.|vendor\.checksums\.sha256$' || true)
 
 # ── Hard block: never allow private-key / cert-bundle material to be committed ──
 # (F-01) Matches by extension and by filename anywhere in the tree. This is a
@@ -33,12 +33,12 @@ fi
 if [ -n "$CARGO_CHANGED" ] && [ -z "$VENDOR_CHANGED" ]; then
     echo ""
     echo "  ┌─────────────────────────────────────────────────────────────────┐"
-    echo "  │  WARNING: Cargo.toml/Cargo.lock changed — vendor.tar.xz not    │"
+    echo "  │  WARNING: Cargo.toml/Cargo.lock changed — vendor not resynced  │"
     echo "  │  If you added, removed, or updated a dependency, run:           │"
     echo "  │    bash scripts/internal/update-vendor.sh                      │"
-    echo "  │    git add vendor.tar.xz vendor.tar.xz.sha256                  │"
+    echo "  │    git add vendor.tar.gz.* vendor.checksums.sha256            │"
     echo "  │  Version-only bumps (no dep changes) can ignore this warning.  │"
-    echo "  │  CI will fail if vendor.tar.xz is actually out of sync.         │"
+    echo "  │  CI will fail if the vendor archive is actually out of sync.    │"
     echo "  └─────────────────────────────────────────────────────────────────┘"
     echo ""
 fi

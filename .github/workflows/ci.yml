@@ -259,11 +259,11 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Verify committed archive checksum
-        run: sha256sum -c vendor.tar.xz.sha256
+      - name: Verify committed archive checksums
+        run: sha256sum -c vendor.checksums.sha256
 
       - name: Extract committed vendor archive
-        run: tar -xJf vendor.tar.xz
+        run: cat vendor.tar.gz.* | tar -xzf -
 
       - name: Re-vendor from current Cargo.lock
         run: cargo vendor --sync ci/tools/Cargo.toml vendor-expected/
@@ -271,12 +271,12 @@ jobs:
       - name: Compare vendor directories
         run: |
           if ! diff -rq vendor/ vendor-expected/ > /dev/null 2>&1; then
-            echo "vendor.tar.xz is out of sync with Cargo.lock." >&2
-            echo "Run 'bash scripts/internal/update-vendor.sh' and commit both updated files." >&2
+            echo "The committed vendor archive is out of sync with Cargo.lock." >&2
+            echo "Run 'bash scripts/internal/update-vendor.sh' and commit the updated files." >&2
             diff -rq vendor/ vendor-expected/ >&2 || true
             exit 1
           fi
-          echo "vendor.tar.xz matches Cargo.lock — OK"
+          echo "vendor archive matches Cargo.lock — OK"
 
   pipeline-sim:
     name: Jenkins pipeline simulation

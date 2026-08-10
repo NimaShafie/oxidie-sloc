@@ -5,7 +5,7 @@
 __pycache__/
 *.py[cod]
 
-# Uncompressed vendor sources — always extract from vendor.tar.xz; never commit the directory
+# Uncompressed vendor sources — always extract from the vendor.tar.gz.* parts; never commit the directory
 /vendor/
 
 # .cargo/config.toml is written by CI (Jenkinsfile) and local airgap scripts; not committed

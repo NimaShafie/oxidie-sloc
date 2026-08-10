@@ -58,12 +58,14 @@ jobs:
               exit 1
             fi
           done
-          # Confirm the vendor archive and its checksum are both present.
-          if [ ! -f vendor.tar.xz ] || [ ! -f vendor.tar.xz.sha256 ]; then
-            echo "ERROR: vendor.tar.xz or vendor.tar.xz.sha256 is missing"
-            exit 1
-          fi
-          sha256sum -c vendor.tar.xz.sha256
+          # Confirm the split vendor parts and their checksum file are all present.
+          for part in vendor.tar.gz.aa vendor.tar.gz.ab vendor.tar.gz.ac vendor.checksums.sha256; do
+            if [ ! -f "$part" ]; then
+              echo "ERROR: $part is missing"
+              exit 1
+            fi
+          done
+          sha256sum -c vendor.checksums.sha256
           echo "Workspace structure OK"
 
       - name: Build and push

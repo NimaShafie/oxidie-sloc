@@ -229,8 +229,10 @@ Or manually:
 cargo build --release --workspace
 ```
 
-The repo commits a `vendor.tar.xz` of all ~328 crate dependencies and split Rust toolchain
-archives so the entire build works with no internet access on Windows (Git Bash) and Linux x86_64/arm64.
+The repo commits split gzip parts (`vendor.tar.gz.aa` / `.ab` / `.ac` plus `vendor.checksums.sha256`)
+of all ~328 crate dependencies and split Rust toolchain archives so the entire build works with no
+internet access on Windows (Git Bash) and Linux x86_64/arm64. Gzip is used (not xz) so stock Git Bash
+on Windows, which has no `xz`, can extract it.
 
 ---
 

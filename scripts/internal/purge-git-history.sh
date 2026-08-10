@@ -4,9 +4,10 @@
 # =============================================================================
 #
 # WHY THIS EXISTS
-#   oxide-sloc commits its offline-build payload directly to git (vendor.tar.xz,
-#   the split Rust toolchain archives, dist release binaries). Every dependency
-#   bump re-commits vendor.tar.xz (~65 MB) and every Rust version bump re-commits
+#   oxide-sloc commits its offline-build payload directly to git (the split
+#   vendor.tar.gz.* parts, the split Rust toolchain archives, dist release
+#   binaries). Every dependency bump re-commits the vendor parts (~65 MB total)
+#   and every Rust version bump re-commits
 #   the toolchain (~590 MB). Old copies accumulate in history forever, so .git
 #   grows without bound. This was first cleaned on 2026-07-03 (3.66 GiB -> 688 MiB).
 #   This script codifies that exact procedure so future re-purges are one command.
@@ -37,11 +38,11 @@ set -euo pipefail
 REPO_SLUG="oxide-sloc/oxide-sloc"
 # Paths whose *entire history* is stripped. Current HEAD copies of RE-ADD paths
 # are restored after the strip so the offline build still works.
-STRIP_PATHS=( vendor.tar.xz vendor.tar.xz.sha256 )
+STRIP_PATHS=( vendor.tar.gz.aa vendor.tar.gz.ab vendor.tar.gz.ac vendor.checksums.sha256 )
 STRIP_GLOBS=( 'toolchain/rust-toolchain-*' )
 STRIP_DIRS=( vendor/ dist/ )          # vendor/ is purged entirely (gitignored at HEAD)
 # Paths to copy from current HEAD and re-add after the rewrite (must build offline):
-READD_FILES=( vendor.tar.xz vendor.tar.xz.sha256 )
+READD_FILES=( vendor.tar.gz.aa vendor.tar.gz.ab vendor.tar.gz.ac vendor.checksums.sha256 )
 READD_GLOBS=( 'toolchain/rust-toolchain-*' )     # toolchain/checksums.sha256 is NOT stripped
 READD_DIR_FILES=( 'dist/*' )          # whatever dist files are tracked at HEAD
 # Workflows that fire on tag/any push — disabled during the tag force-push:
@@ -87,7 +88,7 @@ done
 for f in "${READD_FILES[@]}"; do [[ -e "$f" ]] && cp "$f" "$BK/head-assets/"; done
 for g in "${READD_GLOBS[@]}"; do cp $g "$BK/head-assets/" 2>/dev/null || true; done
 mkdir -p "$BK/head-assets/dist"; for g in "${READD_DIR_FILES[@]}"; do cp $g "$BK/head-assets/dist/" 2>/dev/null || true; done
-( cd "$BK/head-assets" && sha256sum -c vendor.tar.xz.sha256 >/dev/null && echo "  head-assets checksum OK" )
+( cd "$BK/head-assets" && sha256sum -c vendor.checksums.sha256 >/dev/null && echo "  head-assets checksum OK" )
 
 # ---- Phase 1: rewrite on a throwaway clone ----------------------------------
 log "Phase 1 — filter-repo on a throwaway clone (working repo untouched)"
@@ -100,7 +101,7 @@ for d in "${STRIP_DIRS[@]}";  do fr_args+=( --path "$d" ); done
 for g in "${STRIP_GLOBS[@]}"; do fr_args+=( --path-glob "$g" ); done
 git filter-repo "${fr_args[@]}"
 # re-add current assets at HEAD
-cp "$BK/head-assets/"*.tar.xz "$BK/head-assets/"*.sha256 . 2>/dev/null || true
+for f in "${READD_FILES[@]}"; do cp "$BK/head-assets/$(basename "$f")" . 2>/dev/null || true; done
 mkdir -p toolchain dist
 cp "$BK"/head-assets/rust-toolchain-* toolchain/ 2>/dev/null || true
 cp "$BK"/head-assets/dist/* dist/ 2>/dev/null || true
@@ -111,8 +112,8 @@ git commit -q -m "chore: purge superseded vendor/toolchain/dist blobs from histo
 log "Phase 2 — verify (size + checksum + HEAD assets)"
 git reflog expire --expire=now --all; git gc --prune=now >/dev/null 2>&1
 echo "  .git size after: $(git count-objects -vH | awk '/size-pack/{print $2,$3}')"
-sha256sum -c vendor.tar.xz.sha256 >/dev/null && echo "  checksum invariant OK"
-[[ -e vendor.tar.xz ]] || die "vendor.tar.xz missing at HEAD after rewrite!"
+sha256sum -c vendor.checksums.sha256 >/dev/null && echo "  checksum invariant OK"
+[[ -e vendor.tar.gz.aa ]] || die "vendor.tar.gz.aa missing at HEAD after rewrite!"
 [[ $(ls toolchain/rust-toolchain-* 2>/dev/null | wc -l) -gt 0 ]] || die "toolchain archives missing at HEAD!"
 echo "  commits preserved: $(git rev-list --count HEAD)   tags: $(git tag | wc -l)"
 echo "  rewritten clone ready at: $TMP"

@@ -7,7 +7,8 @@ Every `git clone` includes everything needed to install and run oxide-sloc offli
 | What | File | Size | Status |
 |---|---|---|---|
 | **Windows pre-built binary** | `dist/oxide-sloc-windows-x64.zip` | ~9 MB | **Always committed** — updated by CI after every release |
-| All Rust crate sources | `vendor.tar.xz` | 35 MB | **Always committed** |
+| All Rust crate sources | `vendor.tar.gz.aa` / `.ab` / `.ac` | ~115 MB total (≤45 MB each) | **Always committed** |
+| Vendor checksums | `vendor.checksums.sha256` | — | **Always committed** (per-part SHA-256) |
 | Rust version pin | `rust-toolchain.toml` | — | **Always committed** |
 | Cargo offline config | `.cargo/config.toml` | — | Written by install.sh / CI at build time |
 | **Rust compiler + cargo (Linux)** | `toolchain/rust-toolchain-linux-*.tar.gz.aa` + `.ab` … | ≤45 MB per part | **Maintainer step** — only present after running `bundle-rust-toolchain.sh` and committing |
@@ -19,7 +20,7 @@ automatically. No network calls are made by default.
 `dist/` and launches the web UI. No Rust toolchain required, no compilation.
 
 **Linux — Rust already installed:** a plain `git clone` + `bash scripts/run.sh` builds
-offline from `vendor.tar.xz` with no extra steps.
+offline from the `vendor.tar.gz.*` parts with no extra steps.
 
 **Linux — Rust NOT installed:** a fully offline build additionally requires the maintainer to
 have committed the `toolchain/` archives (see
@@ -97,7 +98,7 @@ the maintainer must run `bundle-rust-toolchain.sh` and commit the result first (
 
 ```bash
 # On the air-gapped Linux machine — after git clone (toolchain/ must already be committed):
-bash scripts/run.sh   # bootstraps Rust, builds from vendor.tar.xz, launches web UI
+bash scripts/run.sh   # bootstraps Rust, builds from vendor.tar.gz.*, launches web UI
 ```
 
 **What install.sh does under the hood:**
@@ -105,7 +106,7 @@ bash scripts/run.sh   # bootstraps Rust, builds from vendor.tar.xz, launches web
 2. Finds `toolchain/rust-toolchain-linux-{arch}.tar.gz`.
 3. Verifies the SHA-256 checksum (from `toolchain/checksums.sha256`).
 4. Extracts to `.tools/` and exports `RUSTUP_HOME`/`CARGO_HOME`/`PATH` for the session.
-5. Decompresses `vendor.tar.xz` (one-time, ~35 MB → ~362 MB).
+5. Verifies (`vendor.checksums.sha256`), reassembles, and decompresses `vendor.tar.gz.*` (one-time, ~115 MB → ~362 MB).
 6. Runs `cargo build --release --offline -p oxide-sloc` with the animated progress display.
 7. Copies the result to `oxide-sloc` in the repo root.
 
@@ -159,25 +160,28 @@ SHA-256, and regenerates `toolchain/checksums.sha256`.
 
 Use this when the Rust toolchain (≥1.95) is already installed on the target machine.
 
-`vendor.tar.xz` and `vendor.tar.xz.sha256` are **committed to the repository** — every
-`git clone` includes them. No separate download is needed.
+The `vendor.tar.gz.*` parts and `vendor.checksums.sha256` are **committed to the repository** —
+every `git clone` includes them. No separate download is needed. Gzip is used (not xz) so stock
+Git Bash on Windows, which has no `xz`, can extract them; the archive is split into ≤45 MB parts
+to stay under GitHub's 100 MB per-file limit.
 
 ```bash
-bash scripts/run.sh   # detects cargo, decompresses vendor.tar.xz, builds offline, launches
+bash scripts/run.sh   # detects cargo, reassembles + decompresses vendor.tar.gz.*, builds offline, launches
 ```
 
 Or manually via the internal helper:
 
 ```bash
-bash scripts/internal/airgap-build.sh vendor.tar.xz
+bash scripts/internal/airgap-build.sh
 # Binary lands at: target/release/oxide-sloc
 bash scripts/run.sh
 ```
 
-`scripts/internal/airgap-build.sh` verifies the vendor checksum, extracts, writes
+`scripts/internal/airgap-build.sh` verifies the per-part checksums
+(`vendor.checksums.sha256`), reassembles the `vendor.tar.gz.*` parts, extracts, writes
 `.cargo/config.toml`, and runs `cargo build --release --offline`.
 
-> **What vendor.tar.xz covers:** all ~328 Rust crate sources needed for a fully offline
+> **What the `vendor.tar.gz.*` parts cover:** all ~328 Rust crate sources needed for a fully offline
 > `cargo build`. The Rust toolchain itself is not included — for that, use
 > [Option A](#option-a--build-from-bundled-rust-toolchain) or
 > [Option C](#option-c--airgap-kit-linux-no-rust).
@@ -218,7 +222,7 @@ the Rust toolchain, musl C toolchain, vendor sources, and the full source tree.
 | `rust-{ver}-{target}.tar.gz` | Rust host toolchain (rustc, cargo, std) |
 | `rust-std-{ver}-{musl-target}.tar.gz` | Rust musl target standard library |
 | `{arch}-linux-musl-native.tgz` | musl-gcc + headers + libc |
-| `vendor.tar.xz` | All ~328 Rust crate sources |
+| `vendor.tar.gz.aa` / `.ab` / `.ac` + `vendor.checksums.sha256` | All ~328 Rust crate sources (split gzip parts) |
 | `oxide-sloc-src.tar.gz` | Full source tree |
 | `install.sh` | Wires everything together and builds |
 
@@ -269,7 +273,7 @@ called automatically and should not be invoked directly.
 | `scripts/internal/airgap-build.sh` | Manually (Option B manual path) | Plain offline build from vendor sources |
 | `scripts/internal/bundle-rust-toolchain.sh` | Maintainer tooling | Downloads Rust toolchain, stages into `toolchain/` for commit |
 | `scripts/internal/make-airgap-kit.sh` | Maintainer tooling | Builds Option C self-contained kit for Linux |
-| `scripts/internal/update-vendor.sh` | Maintainer tooling | Regenerates `vendor.tar.xz` after dependency changes |
+| `scripts/internal/update-vendor.sh` | Maintainer tooling | Regenerates the `vendor.tar.gz.*` parts + `vendor.checksums.sha256` after dependency changes |
 | `scripts/internal/install-hooks.sh` | Developer setup | Installs git pre-commit hooks |
 
 ---
@@ -278,8 +282,8 @@ called automatically and should not be invoked directly.
 
 ### Jenkins
 
-`vendor.tar.xz` is committed to the repo — Cargo crate sources are fully covered after a
-`git clone`. The Rust toolchain is not in git; two options:
+The `vendor.tar.gz.*` parts are committed to the repo — Cargo crate sources are fully covered
+after a `git clone`. The Rust toolchain is not in git; two options:
 
 **Option 1 — Rebuild `ci/jenkins/Dockerfile.agent` (recommended)**
 
@@ -304,8 +308,9 @@ so every committed file is well within GitHub's per-file limit.
 ### GitHub Actions (self-hosted runner)
 
 For internet-connected runners, cargo downloads crates normally via Swatinem/rust-cache.
-For air-gapped runners, `vendor.tar.xz` is already in the workspace after `git clone` —
-add a vendor extraction step before `cargo build`.
+For air-gapped runners, the `vendor.tar.gz.*` parts are already in the workspace after
+`git clone` — add a verify + reassemble + extract step
+(`sha256sum -c vendor.checksums.sha256 && cat vendor.tar.gz.* | tar -xzf -`) before `cargo build`.
 
 ---
 

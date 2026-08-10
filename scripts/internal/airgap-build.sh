@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Offline source build for oxide-sloc.
 #
-# vendor.tar.xz is committed to the repository — no separate download needed.
-# Transfer the full repository (or vendor.tar.xz + source tree) to the target
+# The split vendor parts (vendor.tar.gz.aa/.ab/.ac) are committed to the
+# repository — no separate download needed. Transfer the full repository (or the
+# vendor.tar.gz.* parts + vendor.checksums.sha256 + source tree) to the target
 # machine, then run this script.
 #
 # Usage (on the target machine):
-#   bash scripts/internal/airgap-build.sh [vendor.tar.xz]
+#   bash scripts/internal/airgap-build.sh [dir-with-vendor-parts]
 #
-# Requirements: Rust toolchain (see rust-toolchain.toml), tar, sha256sum.
+# The optional argument is the directory that holds the vendor.tar.gz.* parts;
+# it defaults to the current directory.
+#
+# Requirements: Rust toolchain (see rust-toolchain.toml), tar, gzip, sha256sum.
 set -euo pipefail
 
-ARCHIVE="${1:-vendor.tar.xz}"
+PARTS_DIR="${1:-.}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -40,22 +44,22 @@ trap '_on_exit' EXIT
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
-if [ ! -f "$ARCHIVE" ]; then
-    echo "ERROR: vendor archive not found: $ARCHIVE"
-    echo "vendor.tar.xz is committed to the repository — ensure you have the complete"
-    echo "repository, not just source files."
+if ! ls "${PARTS_DIR}"/vendor.tar.gz.* >/dev/null 2>&1; then
+    echo "ERROR: vendor parts not found in: ${PARTS_DIR}"
+    echo "The vendor.tar.gz.* split parts are committed to the repository — ensure you"
+    echo "have the complete repository, not just source files."
     exit 1
 fi
 
-echo "==> Verifying vendor archive checksum..."
-if [ -f "${ARCHIVE}.sha256" ]; then
-    sha256sum -c "${ARCHIVE}.sha256"
+echo "==> Verifying vendor parts checksums..."
+if [ -f "${PARTS_DIR}/vendor.checksums.sha256" ]; then
+    ( cd "${PARTS_DIR}" && sha256sum -c vendor.checksums.sha256 )
 else
-    echo "WARNING: ${ARCHIVE}.sha256 not found — skipping checksum verification."
+    echo "WARNING: ${PARTS_DIR}/vendor.checksums.sha256 not found — skipping checksum verification."
 fi
 
-echo "==> Extracting vendor archive..."
-tar -xJf "$ARCHIVE"
+echo "==> Reassembling and extracting vendor parts..."
+cat "${PARTS_DIR}"/vendor.tar.gz.* | tar -xzf -
 
 echo "==> Configuring cargo to use vendor directory..."
 mkdir -p .cargo

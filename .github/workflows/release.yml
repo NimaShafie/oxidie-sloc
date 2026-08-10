@@ -290,8 +290,10 @@ jobs:
         with:
           name: vendor-archive
           path: |
-            vendor.tar.xz
-            vendor.tar.xz.sha256
+            vendor.tar.gz.aa
+            vendor.tar.gz.ab
+            vendor.tar.gz.ac
+            vendor.checksums.sha256
 
   sbom:
     name: Generate SBOM
@@ -778,7 +780,7 @@ jobs:
             | Windows x86-64 | `oxide-sloc-windows-x86_64.exe` | Windows 10/11 |
             | macOS x86-64 | `oxide-sloc-macos-x86_64` | Intel Mac |
             | macOS Apple Silicon | `oxide-sloc-macos-arm64` | M1/M2/M3/M4 Mac |
-            | Vendor archive | `vendor.tar.xz` + `vendor.tar.xz.sha256` | Rust dependency sources for air-gapped builds |
+            | Vendor archive | `vendor.tar.gz.aa` + `.ab` + `.ac` + `vendor.checksums.sha256` | Rust dependency sources (split gzip parts) for air-gapped builds |
 
             Checksums for all release assets are in `SHA256SUMS.txt`.
             GPG detached signatures (`.sig`), Sigstore cosign bundles (`.bundle`), and SLSA provenance attestations (`.sigstore.json`) are included for each binary.
@@ -826,7 +828,7 @@ jobs:
 
             ```bash
             # Download source + vendor archive from this release, then on the air-gapped machine:
-            bash scripts/internal/airgap-build.sh vendor.tar.xz
+            bash scripts/internal/airgap-build.sh
             ```
 
             ## Or build from source (requires Rust 1.97+)

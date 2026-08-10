@@ -48,7 +48,7 @@ oxide-sloc is a single self-contained binary — there are no daemon processes, 
 Every CI integration follows the same three-step pattern:
 
 ```
-1. acquire the binary  →  decompress vendor.tar.xz, install Rust, build oxide-sloc
+1. acquire the binary  →  reassemble + decompress vendor.tar.gz.*, install Rust, build oxide-sloc
 2. run the scan        →  oxide-sloc analyze ./src \
                               --json-out result.json \
                               --csv-out  report.csv \
@@ -61,7 +61,7 @@ Every CI integration follows the same three-step pattern:
 
 ### Vendor sources note
 
-`vendor.tar.xz` contains all Rust crate dependencies (~27 MB, xz-compressed). It is **committed to the repository** — a plain `git clone` is sufficient for a fully offline Cargo build; no separate download step is required. It is also attached to each GitHub release as a standalone asset for non-git workflows.
+The split gzip parts `vendor.tar.gz.aa` / `.ab` / `.ac` contain all Rust crate dependencies (~115 MB total, gzip-compressed, split into ≤45 MB parts to stay under GitHub's 100 MB per-file limit) alongside `vendor.checksums.sha256`. Gzip is used (not xz) so stock Git Bash on Windows, which has no `xz`, can extract them. They are **committed to the repository** — a plain `git clone` is sufficient for a fully offline Cargo build; no separate download step is required. They are also attached to each GitHub release as standalone assets for non-git workflows.
 
 The included Jenkinsfile and GitLab CI pipeline files decompress and cache `vendor/` automatically from the committed archive. The `.cargo/config.toml` is written at build time to redirect cargo to the vendored sources:
 
@@ -549,11 +549,11 @@ pipeline {
                     fi
                     if [ -d vendor ]; then
                         :   # already present
-                    elif [ -f vendor.tar.xz ]; then
-                        sha256sum -c vendor.tar.xz.sha256
-                        tar -xJf vendor.tar.xz
+                    elif [ -f vendor.tar.gz.aa ]; then
+                        sha256sum -c vendor.checksums.sha256
+                        cat vendor.tar.gz.* | tar -xzf -
                     fi
-                    # No vendor.tar.xz → cargo fetches from crates.io (online mode).
+                    # No vendor.tar.gz.* → cargo fetches from crates.io (online mode).
                 '''
             }
         }
@@ -926,8 +926,8 @@ Two workflows ship in `.github/workflows/`:
 ### Adding a scan step to an existing workflow
 
 ```yaml
-- name: Decompress vendor sources
-  run: tar -xJf vendor.tar.xz
+- name: Verify + decompress vendor sources
+  run: sha256sum -c vendor.checksums.sha256 && cat vendor.tar.gz.* | tar -xzf -
 
 - name: Install oxide-sloc
   run: cargo install --path crates/sloc-cli
