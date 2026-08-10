@@ -61,14 +61,9 @@ else
     BUILD_OUTPUT="$REPO_ROOT/target/release/oxide-sloc"
 fi
 
-# Prefer vendor.tar.gz (gzip-compressed) if present; fall back to vendor.tar.xz
-if [[ -f "$REPO_ROOT/vendor.tar.gz" ]]; then
-    VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.gz"
-    VENDOR_DECOMP="tar -xzf"
-else
-    VENDOR_ARCHIVE="$REPO_ROOT/vendor.tar.xz"
-    VENDOR_DECOMP="tar -xJf"
-fi
+# Vendor sources ship as split gzip parts (vendor.tar.gz.aa/.ab/.ac) reassembled
+# with `cat | tar -xzf -`; gzip is universal (Git for Windows bundles no xz).
+VENDOR_CHECKSUMS="$REPO_ROOT/vendor.checksums.sha256"
 VENDOR_DIR="$REPO_ROOT/vendor"
 
 LOG_DIR="$REPO_ROOT/logs"
@@ -734,12 +729,35 @@ fi
 # ── 5. Build from vendored sources ──────────────────────────────────────────
 if command -v cargo &>/dev/null; then
     if [[ ! -d "$VENDOR_DIR" ]]; then
-        if [[ -f "$VENDOR_ARCHIVE" ]]; then
-            echo " Decompressing $(basename "$VENDOR_ARCHIVE") (one-time)..."
-            $VENDOR_DECOMP "$VENDOR_ARCHIVE" -C "$REPO_ROOT"
+        # Collect split vendor parts (vendor.tar.gz.aa, .ab, .ac).
+        VENDOR_PARTS=()
+        for _vp in "$REPO_ROOT"/vendor.tar.gz.*; do
+            [[ -f "$_vp" ]] && VENDOR_PARTS+=("$_vp")
+        done
+        if [[ "${#VENDOR_PARTS[@]}" -gt 0 ]]; then
+            # Verify each part against vendor.checksums.sha256 (mirrors the toolchain
+            # verify loop above) before reassembling.
+            if [[ -f "$VENDOR_CHECKSUMS" ]] && command -v sha256sum &>/dev/null; then
+                for _vf in "${VENDOR_PARTS[@]}"; do
+                    _VF_NAME="$(basename "$_vf")"
+                    _EXPECTED="$(grep "$_VF_NAME" "$VENDOR_CHECKSUMS" 2>/dev/null | awk '{print $1}')"
+                    if [[ -n "$_EXPECTED" ]]; then
+                        _ACTUAL="$(sha256sum "$_vf" | awk '{print $1}')"
+                        if [[ "$_EXPECTED" != "$_ACTUAL" ]]; then
+                            echo " [ERROR] Vendor checksum mismatch — ${_VF_NAME} may be corrupt." >&2
+                            echo "         Expected: $_EXPECTED" >&2
+                            echo "         Actual:   $_ACTUAL" >&2
+                            exit 1
+                        fi
+                    fi
+                done
+                echo " [OK] Vendor checksum verified."
+            fi
+            echo " Reassembling and decompressing vendor sources (one-time)..."
+            cat "${VENDOR_PARTS[@]}" | tar -xzf - -C "$REPO_ROOT"
             echo " [OK] Vendor sources ready."
         else
-            echo " [ERROR] Neither vendor/ nor vendor.tar.xz / vendor.tar.gz found." >&2
+            echo " [ERROR] Neither vendor/ nor vendor.tar.gz.* parts found." >&2
             echo "         The vendor archive is committed to the repository — ensure you have" >&2
             echo "         the complete repository, not just source files." >&2
             exit 1

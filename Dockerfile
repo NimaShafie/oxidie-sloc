@@ -29,7 +29,6 @@ RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
     pkg-config \
-    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -38,14 +37,15 @@ RUN mkdir -p .cargo
 COPY ci/docker-cargo-config.toml .cargo/config.toml
 COPY crates/ crates/
 COPY docs/ docs/
-COPY vendor.tar.xz vendor.tar.xz.sha256 ./
+COPY vendor.tar.gz.aa vendor.tar.gz.ab vendor.tar.gz.ac vendor.checksums.sha256 ./
 
-# Verify the vendor archive integrity and extract it.
+# Verify the split vendor parts, reassemble and extract them.
 # This must happen before `cargo build` because .cargo/config.toml points cargo
 # at the vendor/ directory as the sole crate source (no network access).
-RUN sha256sum -c vendor.tar.xz.sha256 \
-    && tar -xJf vendor.tar.xz \
-    && rm vendor.tar.xz
+# gzip is used (not xz) because it is universally available on all agents.
+RUN sha256sum -c vendor.checksums.sha256 \
+    && cat vendor.tar.gz.* | tar -xzf - \
+    && rm -f vendor.tar.gz.*
 
 # Pre-flight: confirm the workspace source tree is actually present in the build
 # context. If crates/ is accidentally re-added to .dockerignore this produces a

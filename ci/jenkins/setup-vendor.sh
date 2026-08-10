@@ -1,38 +1,37 @@
 #!/usr/bin/env bash
-# Decompress vendor.tar.xz and write .cargo/config.toml for offline builds.
+# Reassemble the split vendor.tar.gz parts and write .cargo/config.toml for offline builds.
 # CARGO_HOME is set by the Jenkinsfile environment{} block.
 set -euo pipefail
 
-AGENT_ARCHIVE="${CARGO_HOME}/../vendor.tar.xz"
-AGENT_SHA="${CARGO_HOME}/../vendor.tar.xz.sha256"
+AGENT_CHECKSUMS="${CARGO_HOME}/../vendor.checksums.sha256"
 
 # Stale vendor/ from a recycled workspace — re-extract to guarantee Cargo.lock-aligned versions.
-if [ -d vendor ] && [ -f vendor.tar.xz ]; then
-    echo "vendor/ exists alongside a tarball — wiping and re-extracting for freshness."
+if [ -d vendor ] && ls vendor.tar.gz.* >/dev/null 2>&1; then
+    echo "vendor/ exists alongside split parts — wiping and re-extracting for freshness."
     rm -rf vendor
 fi
 
 if [ -d vendor ]; then
     echo "vendor/ already present — skipping extraction."
-elif [ -f vendor.tar.xz ]; then
-    echo "Verifying vendor.tar.xz integrity..."
-    sha256sum -c vendor.tar.xz.sha256
-    echo "Decompressing vendor.tar.xz..."
-    tar -xJf vendor.tar.xz
-elif [ -f "${AGENT_ARCHIVE}" ]; then
-    echo "vendor.tar.xz not in workspace — falling back to agent cache..."
-    cp "${AGENT_ARCHIVE}" vendor.tar.xz
-    if [ -f "${AGENT_SHA}" ]; then
-        cp "${AGENT_SHA}" vendor.tar.xz.sha256
-        echo "Verifying vendor.tar.xz integrity..."
-        sha256sum -c vendor.tar.xz.sha256
+elif ls vendor.tar.gz.* >/dev/null 2>&1; then
+    echo "Verifying vendor.tar.gz.* integrity..."
+    sha256sum -c vendor.checksums.sha256
+    echo "Reassembling and decompressing vendor.tar.gz.*..."
+    cat vendor.tar.gz.* | tar -xzf -
+elif ls "${CARGO_HOME}/.."/vendor.tar.gz.* >/dev/null 2>&1; then
+    echo "vendor.tar.gz.* not in workspace — falling back to agent cache..."
+    cp "${CARGO_HOME}/.."/vendor.tar.gz.* .
+    if [ -f "${AGENT_CHECKSUMS}" ]; then
+        cp "${AGENT_CHECKSUMS}" vendor.checksums.sha256
+        echo "Verifying vendor.tar.gz.* integrity..."
+        sha256sum -c vendor.checksums.sha256
     else
-        echo "WARNING: No .sha256 in agent cache — skipping checksum verification."
+        echo "WARNING: No vendor.checksums.sha256 in agent cache — skipping checksum verification."
     fi
-    echo "Decompressing vendor.tar.xz..."
-    tar -xJf vendor.tar.xz
+    echo "Reassembling and decompressing vendor.tar.gz.*..."
+    cat vendor.tar.gz.* | tar -xzf -
 else
-    echo "ERROR: vendor.tar.xz not found in workspace or agent cache." >&2
+    echo "ERROR: vendor.tar.gz.* parts not found in workspace or agent cache." >&2
     echo "       Ensure the repository was cloned from the correct branch/tag." >&2
     exit 1
 fi

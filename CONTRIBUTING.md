@@ -65,18 +65,18 @@ oxide-sloc implements **physical SLOC** per **IEEE Std 1045-1992**. The configur
 
 ## Vendor archive (for air-gapped builds and releases)
 
-`vendor.tar.xz` and `vendor.tar.xz.sha256` are **committed to the repository** so that a plain `git clone` is sufficient for a fully offline (air-gapped) build. Both files must always be updated together.
+The split gzip parts `vendor.tar.gz.aa` / `.ab` / `.ac` and `vendor.checksums.sha256` are **committed to the repository** so that a plain `git clone` is sufficient for a fully offline (air-gapped) build. All parts and the checksums file must always be updated together. Gzip is used (not xz) because stock Git Bash on Windows has no `xz`; gzip extracts everywhere. The parts are split into ≤45 MB chunks to stay under GitHub's 100 MB per-file limit and total ~115 MB.
 
-For normal development, cargo downloads from crates.io and no vendor setup is needed. When you add or upgrade a dependency, regenerate the archive and commit both files atomically:
+For normal development, cargo downloads from crates.io and no vendor setup is needed. When you add or upgrade a dependency, regenerate the archive and commit all parts atomically:
 
 ```bash
-# Regenerate the vendor snapshot, repack the archive, and rewrite the .sha256 file
+# Regenerate the vendor snapshot, repack the split parts, and rewrite the checksums file
 bash scripts/internal/update-vendor.sh
-git add vendor.tar.xz vendor.tar.xz.sha256
+git add vendor.tar.gz.* vendor.checksums.sha256
 git commit -m "chore: update vendor archive"
 ```
 
-Never commit `vendor.tar.xz` without updating `vendor.tar.xz.sha256` — both the Docker build and Jenkins CI verify the checksum before extracting.
+Verify + reassemble + extract with `sha256sum -c vendor.checksums.sha256 && cat vendor.tar.gz.* | tar -xzf -`. Never commit the `vendor.tar.gz.*` parts without updating `vendor.checksums.sha256` — both the Docker build and Jenkins CI verify the checksums before extracting.
 
 For air-gapped builds, see [`docs/airgap.md`](./docs/airgap.md).
 

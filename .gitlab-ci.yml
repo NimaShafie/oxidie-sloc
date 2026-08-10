@@ -23,7 +23,7 @@
 #
 # Air-gap scope: this pipeline vendors the Rust *toolchain* (committed under
 # toolchain/, extracted + pinned in the default before_script) and the Rust
-# *crate sources* (vendor.tar.xz, checksum-verified + extracted, with cargo
+# *crate sources* (vendor.tar.gz.* parts, checksum-verified + extracted, with cargo
 # redirected to them). System packages (build-essential, gtk3, etc.) are NOT
 # vendored — a fully offline runner needs them prebaked into the image (apt is
 # skipped when they are already present; see apt_ensure) or reachable via an apt
@@ -94,11 +94,11 @@ default:
     - rustup show
     # Air-gap: extract the committed vendor archive and pin cargo to it.
     - |
-      if [ -f vendor.tar.xz ] && [ ! -d vendor ]; then
-        echo "Verifying vendor.tar.xz integrity..."
-        sha256sum -c vendor.tar.xz.sha256
-        echo "Decompressing vendor.tar.xz..."
-        tar -xJf vendor.tar.xz
+      if ls vendor.tar.gz.* >/dev/null 2>&1 && [ ! -d vendor ]; then
+        echo "Verifying vendor.tar.gz.* integrity..."
+        sha256sum -c vendor.checksums.sha256
+        echo "Reassembling and decompressing vendor.tar.gz.*..."
+        cat vendor.tar.gz.* | tar -xzf -
         mkdir -p .cargo
         printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
       fi

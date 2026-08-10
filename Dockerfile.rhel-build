@@ -15,9 +15,10 @@
 #     --output type=local,dest=./out .
 #   # -> ./out/oxide-sloc  (RHEL 8/9/10-compatible)
 #
-# The crate build is fully offline: it consumes the committed vendor.tar.xz
-# (verified by sha256) via ci/docker-cargo-config.toml, so no crates.io access
-# is required. Only the one-time rustup bootstrap needs the network.
+# The crate build is fully offline: it consumes the committed split vendor
+# parts (vendor.tar.gz.aa/.ab/.ac, verified by sha256) via
+# ci/docker-cargo-config.toml, so no crates.io access is required. Only the
+# one-time rustup bootstrap needs the network.
 #
 # Hardened builds may substitute an approved UBI mirror WITHOUT editing
 # this file, e.g.:
@@ -39,15 +40,14 @@ FROM ${BUILDER_IMAGE} AS builder
 # which is what the workspace's rust-toolchain.toml also resolves to.
 ARG RUST_VERSION=1.97
 
-# gcc (+ its binutils dependency) is the linker; tar/gzip/xz unpack the vendor
-# archive; findutils/coreutils provide sha256sum. UBI repos serve all of these
-# without a subscription.
+# gcc (+ its binutils dependency) is the linker; tar/gzip unpack the split
+# vendor parts; findutils/coreutils provide sha256sum. UBI repos serve all of
+# these without a subscription.
 RUN dnf -y --setopt=install_weak_deps=false install \
         gcc \
         binutils \
         tar \
         gzip \
-        xz \
         findutils \
         ca-certificates \
     && dnf clean all
@@ -80,14 +80,15 @@ RUN mkdir -p .cargo
 COPY ci/docker-cargo-config.toml .cargo/config.toml
 COPY crates/ crates/
 COPY docs/ docs/
-COPY vendor.tar.xz vendor.tar.xz.sha256 ./
+COPY vendor.tar.gz.aa vendor.tar.gz.ab vendor.tar.gz.ac vendor.checksums.sha256 ./
 
-# Verify the vendored crate archive against its committed checksum, then extract.
-# This must precede `cargo build` because .cargo/config.toml points cargo at the
-# vendor/ directory as the sole (offline) crate source.
-RUN sha256sum -c vendor.tar.xz.sha256 \
-    && tar -xJf vendor.tar.xz \
-    && rm vendor.tar.xz
+# Verify the split vendor parts against their committed checksums, then
+# reassemble and extract. This must precede `cargo build` because
+# .cargo/config.toml points cargo at the vendor/ directory as the sole (offline)
+# crate source. gzip is used (not xz) because it is universally available.
+RUN sha256sum -c vendor.checksums.sha256 \
+    && cat vendor.tar.gz.* | tar -xzf - \
+    && rm -f vendor.tar.gz.*
 
 # Pre-flight: fail loudly if crates/ was accidentally excluded from the context
 # (e.g. re-added to .dockerignore) rather than emitting a cryptic manifest error.

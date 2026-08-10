@@ -58,7 +58,9 @@ Adding a language requires updating both `sloc-languages` (analyzer) and `sloc-c
 
 ## Offline-first build
 
-The repo commits `vendor.tar.xz` (~35 MB) and split Rust toolchain archives so the entire
-build works with no internet access. `.cargo/config.toml` redirects crate lookups to `vendor/`.
-Do not add dependencies without running `bash scripts/internal/update-vendor.sh` and committing
-the updated `vendor.tar.xz` and `vendor.tar.xz.sha256` atomically.
+The repo commits the split gzip parts `vendor.tar.gz.aa` / `.ab` / `.ac` (~115 MB total, ≤45 MB
+each — gzip so stock Git Bash on Windows without `xz` can extract) plus `vendor.checksums.sha256`,
+and split Rust toolchain archives, so the entire build works with no internet access.
+`.cargo/config.toml` redirects crate lookups to `vendor/`. Do not add dependencies without running
+`bash scripts/internal/update-vendor.sh` and committing the updated `vendor.tar.gz.*` parts and
+`vendor.checksums.sha256` atomically.

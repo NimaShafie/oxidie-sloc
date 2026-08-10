@@ -898,14 +898,14 @@ fix the SCM configuration under **Configure → Pipeline → Repository URL** an
 The Jenkins CSP header is blocking inline styles.  Follow [Step 6](#6-configure-the-csp-header-html-report-viewer)
 to deploy `relax-csp.groovy` and restart Jenkins.
 
-### "vendor.tar.xz not found" error
+### "vendor.tar.gz.* not found" error
 
 The repository was cloned from a branch or tag that predates the vendor archive commit.
 Ensure the `main` branch is checked out.  If using a local clone, run:
 
 ```bash
 git pull origin main
-ls -lh vendor.tar.xz vendor.tar.xz.sha256
+ls -lh vendor.tar.gz.* vendor.checksums.sha256
 ```
 
 ### "cargo: command not found"

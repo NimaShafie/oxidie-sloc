@@ -40,9 +40,14 @@
 # 7-zip ultra (level 9) + split at 45 MB keeps every committed file within
 # GitHub's per-file limit.
 #
-# vendor.tar.xz        ~35 MB  — Rust crate sources, xz-compressed
+# vendor.tar.gz.aa/.ab/.ac  ≤45 MB per part — Rust crate sources, gzip-compressed
+#                            (split so no single file exceeds GitHub's 100 MB limit;
+#                             gzip so stock Git Bash on Windows can extract it — no xz)
 # toolchain/           ≤45 MB per part — Rust toolchain split parts
 # jenkins-plugins.tar.xz — varies; rebuild with bundle-jenkins-plugins.sh if needed
+
+# Vendor crate-source archive — split gzip parts at repo root, binary blobs
+vendor.tar.gz.*       binary
 
 # Rust toolchain archives — binary blobs, committed directly
 # Parts produced by bundle-rust-toolchain.sh: *.tar.gz.aa, *.tar.gz.ab, …
@@ -55,7 +60,7 @@ toolchain/*.tar.gz.*  binary
 # never finds useful deltas — yet it still *attempts* delta-compression on every
 # gc/repack/clone, wasting CPU. -delta skips that attempt (no size change; faster
 # maintenance). Applies to the committed vendor/toolchain/dist blobs.
-vendor.tar.xz         -delta
+vendor.tar.gz.*       -delta
 *.tar.xz              -delta
 *.tar.gz              -delta
 toolchain/*.tar.gz.*  -delta

@@ -228,7 +228,8 @@ if [ -z "$CSP" ] || [ "$CSP" = "null" ]; then
 fi
 
 # ── Check g: agent build toolchain + system libraries ─────────────────────
-# The Setup stage decompresses vendor.tar.xz (needs `xz`) and the Jenkinsfile
+# The controller extracts jenkins-plugins.tar.xz (needs `xz`; the vendor archive
+# itself is now gzip split parts and needs only gzip) and the Jenkinsfile
 # runs `cargo clippy --workspace --all-targets --all-features`. Activating
 # --all-features pulls in the optional `rfd` crate, which transitively requires
 # libwayland-dev, libgtk-3-dev, libxdo-dev at build time, and building the
