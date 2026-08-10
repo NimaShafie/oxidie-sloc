@@ -48,13 +48,17 @@ pipeline {
             artifactNumToKeepStr: '5',
             artifactDaysToKeepStr: '14'
         ))
-        timestamps()
         timeout(time: 60, unit: 'MINUTES')
         // NOTE: ansiColor('xterm') was intentionally removed. It is a parse-time
         // hard dependency on the non-default AnsiColor plugin (a missing options
         // directive can't be try/catch'd), and it only colorized console output.
         // Dropping it lets the pipeline run on a controller where AnsiColor isn't
         // installed. To restore coloured logs, install AnsiColor and re-add it.
+        // NOTE: timestamps() was intentionally removed for the same reason. It is a
+        // parse-time hard dependency on the non-default Timestamper plugin — on a
+        // minimal controller it fails the WHOLE pipeline at parse (it cannot be
+        // try/catch'd), exactly like ansiColor above. Re-add it only after
+        // confirming the Timestamper plugin is installed.
     }
 
     // ── Build parameters ──────────────────────────────────────────────────────
@@ -763,7 +767,21 @@ pipeline {
         // ── 3. Build ───────────────────────────────────────────────────────────
         stage('Build') {
             steps {
-                retry(2) { script { h.shx 'cargo build --release -p oxide-sloc' } }
+                // unset CC/CXX inside the build shell: on Windows the airgap-devkit
+                // gcc can leak in via CC and conflict with the MinGW-w64 gcc that the
+                // x86_64-pc-windows-gnu target links with (documented "unset CC on
+                // Windows" rule). initEnv() has already prepended <gitroot>\mingw64\bin
+                // to PATH so cc/gcc/ld resolve. A best-effort `gcc --version` (never
+                // fatal) makes a missing linker diagnosable in the build log.
+                retry(2) {
+                    script {
+                        h.shx '''
+                            unset CC CXX
+                            gcc --version 2>/dev/null | head -1 || echo "gcc not on PATH (link may fail on the windows-gnu target)"
+                            cargo build --release -p oxide-sloc
+                        '''
+                    }
+                }
             }
         }
 
@@ -941,7 +959,10 @@ pipeline {
             script {
                 try {
                     cleanWs()
-                } catch (Exception ex) {
+                } catch (Throwable ex) {
+                    // Throwable, not Exception: a missing ws-cleanup plugin throws
+                    // NoSuchMethodError (a java.lang.Error), which catch(Exception)
+                    // would let escape and fail the whole build.
                     echo "cleanWs skipped: ${ex.message}"
                 }
             }

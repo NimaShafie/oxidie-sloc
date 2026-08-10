@@ -186,22 +186,68 @@ def initEnv() {
         env.PATH        = "${home}/.rust-cache/cargo/bin:/usr/local/bin:/usr/bin:/bin"
         env.BINARY        = "${env.WORKSPACE}/target/release/oxide-sloc"
         env.ARTIFACT_PATH = "${env.WORKSPACE}/target/release/oxide-sloc"
+        // POSIX-normalised mirrors of WORKSPACE / history-home for bash-facing path
+        // construction. On Unix these are byte-identical to the native values, so
+        // callers can uniformly use WS_POSIX / HISTORY_HOME_POSIX with no branching.
+        env.WS_POSIX           = env.WORKSPACE
+        env.HISTORY_HOME_POSIX = env.HOME
     } else {
-        // On Windows HOME is often unset; fall back to USERPROFILE.
-        def home = (env.HOME?.trim() ?: env.USERPROFILE?.trim() ?: 'C:\\Users\\Default')
-        env.CARGO_HOME  = "${home}\\.rust-cache\\cargo"
-        env.RUSTUP_HOME = "${home}\\.rust-cache\\rustup"
-        // PREPEND the cache cargo bin dir to the INHERITED PATH — never replace
-        // it, or System32/Git/Python/cargo would vanish. Use the Windows path
-        // separator (;) and Windows path form for the prepended dir.
-        env.PATH = "${home}\\.rust-cache\\cargo\\bin;${env.PATH}"
-        // BINARY/ARTIFACT_PATH are consumed INSIDE `bash -lc` (shx / run-web-check.sh
+        // Cache root resolution. A Windows Jenkins service account frequently runs
+        // as a locked-down user whose HOME/USERPROFILE points at a read-only or
+        // ACL-restricted profile (and the old 'C:\\Users\\Default' fallback is NEVER
+        // writable). Resolve with an explicit operator override first, then the
+        // usual profile vars, then WORKSPACE — which the agent guarantees is
+        // writable — so the persistent Rust cache always lands somewhere usable:
+        //   SLOC_CACHE_DIR (escape hatch) -> HOME -> USERPROFILE -> WORKSPACE
+        def cacheRoot = (env.SLOC_CACHE_DIR?.trim()
+                            ?: env.HOME?.trim()
+                            ?: env.USERPROFILE?.trim()
+                            ?: env.WORKSPACE)
+        // Export CARGO_HOME/RUSTUP_HOME and the PATH-prepended cargo bin dir in
+        // FORWARD-SLASH (POSIX) form, exactly as BINARY is normalised below. Git
+        // Bash and cargo both accept 'C:/Users/...'; backslash values were mangled
+        // by the coreutils (du/find) inside check-disk-space.sh and diverged from
+        // install-rust-cache.sh's "$HOME/.rust-cache" layout. POSIX form fixes both.
+        def cacheRootPosix = cacheRoot?.replace('\\', '/')
+        env.CARGO_HOME  = "${cacheRootPosix}/.rust-cache/cargo"
+        env.RUSTUP_HOME = "${cacheRootPosix}/.rust-cache/rustup"
+
+        // MinGW gcc/ld for the x86_64-pc-windows-gnu target. shx() runs NON-login
+        // bash (/etc/profile is not sourced), so /mingw64/bin is not injected and
+        // the cargo build would fail linking with "linker 'cc' not found". Derive
+        // the Git install root from the resolved bash.exe (…\Git\bin\bash.exe or
+        // …\Git\usr\bin\bash.exe → strip back to the Git\ root) and PREPEND its
+        // mingw64\bin + usr\bin to PATH (Windows ';'-separated) so gcc/ld resolve.
+        // Guarded: only when a Windows bash path was actually resolved.
+        def gccPrefix = ''
+        def bashPath = resolveBash()
+        if (bashPath) {
+            def norm = bashPath.replace('/', '\\')
+            def marker = '\\Git\\'
+            def idx = norm.toLowerCase().lastIndexOf(marker.toLowerCase())
+            if (idx >= 0) {
+                def gitRoot = norm.substring(0, idx + marker.length() - 1) // …\Git
+                gccPrefix = "${gitRoot}\\mingw64\\bin;${gitRoot}\\usr\\bin;"
+            }
+        }
+        // PREPEND the cache cargo bin dir (POSIX form) + the MinGW/usr dirs to the
+        // INHERITED PATH — never replace it, or System32/Git/Python/cargo vanish.
+        // Windows path separator is ';'.
+        env.PATH = "${cacheRootPosix}/.rust-cache/cargo/bin;${gccPrefix}${env.PATH}"
+
+        // BINARY/ARTIFACT_PATH are consumed INSIDE bash (shx / run-web-check.sh
         // reference "${BINARY}"). A POSIX-style forward-slash path WITH the .exe
         // suffix is what bash resolves correctly on Windows, so use that form.
         // WORKSPACE on Windows uses backslashes — convert to forward slashes.
         def wsPosix = env.WORKSPACE?.replace('\\', '/')
         env.BINARY        = "${wsPosix}/target/release/oxide-sloc.exe"
         env.ARTIFACT_PATH = "${wsPosix}/target/release/oxide-sloc.exe"
+        // POSIX-normalised WORKSPACE + history-home for bash-facing path building.
+        // Backslash WORKSPACE/HOME interpolated raw into bash bodies (mkdir -p, cp,
+        // test -s, git -C, python) produced mixed 'C:\...workspace/ci-out' paths that
+        // coreutils/git mangle. Callers that feed a path into shx use these instead.
+        env.WS_POSIX           = wsPosix
+        env.HISTORY_HOME_POSIX = cacheRootPosix
     }
     env.RUST_LOG = 'warn'
 }
@@ -360,7 +406,10 @@ def runSetup() {
 }
 
 def runUnitTests() {
-    def outDir     = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+    // POSIX-form workspace for all bash-facing paths (see initEnv/WS_POSIX). On Unix
+    // WS_POSIX == WORKSPACE so behaviour is unchanged; on Windows it swaps the
+    // backslash workspace for forward slashes so coreutils in the shx body are happy.
+    def outDir     = "${env.WS_POSIX}/${params.OUTPUT_SUBDIR}"
     def resultsDir = "${outDir}/test-results"
     shx "mkdir -p '${resultsDir}'"
 
@@ -469,7 +518,10 @@ def runUnitTests() {
 }
 
 def runCoverage() {
-    def outDir      = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+    // POSIX-form workspace (WS_POSIX == WORKSPACE on Unix). outDir/coverageDir flow
+    // into shx bodies (mkdir -p, generate-coverage.sh, cargo llvm-cov) and into
+    // fileExists (which accepts forward slashes on Windows), so the POSIX form is safe.
+    def outDir      = "${env.WS_POSIX}/${params.OUTPUT_SUBDIR}"
     def coverageDir = "${outDir}/coverage"
     shx "mkdir -p '${coverageDir}'"
 
@@ -622,14 +674,18 @@ def runAnalyze() {
         error("ACTIVITY_WINDOW must be a number of days (0-3650): ${params.ACTIVITY_WINDOW}")
     }
 
-    def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+    // POSIX-form workspace for bash-facing paths (WS_POSIX == WORKSPACE on Unix).
+    def outDir = "${env.WS_POSIX}/${params.OUTPUT_SUBDIR}"
     shx "mkdir -p '${outDir}'"
 
     // scanRoot is where the project-under-analysis lives: the workspace root for a
     // self-scan, or ./_target when TARGET_REPO_URL was checked out (set in Checkout).
-    // All scan commands and git-based features resolve against it.
-    def scanRoot         = env.SCAN_ROOT?.trim() ?: env.WORKSPACE
-    def scanningExternal = scanRoot != env.WORKSPACE
+    // All scan commands and git-based features resolve against it. Use the POSIX
+    // workspace form as the self-scan default so `git -C '${scanRoot}'` in the shx
+    // bodies below gets forward slashes on Windows. SCAN_ROOT (set in Checkout) is
+    // compared against WS_POSIX so scanningExternal is decided on the same form.
+    def scanRoot         = env.SCAN_ROOT?.trim()?.replace('\\', '/') ?: env.WS_POSIX
+    def scanningExternal = scanRoot != env.WS_POSIX
 
     // Resolve SCAN_PATH against scanRoot ONLY when scanning an external project, so a
     // plain self-scan keeps its exact previous behaviour (relative path, cwd=WORKSPACE).
@@ -782,10 +838,13 @@ def runAnalyze() {
 }
 
 def runArchivePublish() {
-    def outDir   = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+    // POSIX-form paths for the .py/.sh helpers that consume them via shx (WS_POSIX
+    // == WORKSPACE on Unix). The history home is the writable, POSIX-normalised
+    // cache root from initEnv (never a backslash / read-only profile path).
+    def outDir   = "${env.WS_POSIX}/${params.OUTPUT_SUBDIR}"
     def proj     = env.SLOC_PROJECT ?: 'project'
     def jobSlug  = (env.JOB_NAME?.replaceAll('[^a-zA-Z0-9_\\-]', '_') ?: 'oxide-sloc')
-    def histFile = "${env.HOME}/.oxide-sloc-history/${jobSlug}.csv"
+    def histFile = "${env.HISTORY_HOME_POSIX}/.oxide-sloc-history/${jobSlug}.csv"
 
     shx "${pyBin()} ci/jenkins/generate-trend-csv.py '${outDir}' '${proj}' '${histFile}'"
 
@@ -939,7 +998,9 @@ def runPushArtifacts() {
         error("Invalid ARTIFACT_REPO_TYPE: ${params.ARTIFACT_REPO_TYPE}")
     }
 
-    def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+    // POSIX-form paths — outDir/binaryPath/junitPath/srcPath all flow into shx `cp`
+    // (and ARTIFACT_DIR into artifact-push.sh); WS_POSIX == WORKSPACE on Unix.
+    def outDir = "${env.WS_POSIX}/${params.OUTPUT_SUBDIR}"
 
     def repoPath = params.ARTIFACT_REPO_PATH
         .replace('${JOB_NAME}',     env.JOB_NAME    ?: 'unknown-job')
@@ -955,7 +1016,7 @@ def runPushArtifacts() {
 
     if (params.ARTIFACT_PUSH_BINARY) {
         def binaryName = isUnix() ? 'oxide-sloc' : 'oxide-sloc.exe'
-        def binaryPath = "${env.WORKSPACE}/target/release/${binaryName}"
+        def binaryPath = "${env.WS_POSIX}/target/release/${binaryName}"
         if (fileExists(binaryPath)) {
             shx "cp '${binaryPath}' '${outDir}/${binaryName}'"
             filesToPush << binaryName
@@ -967,7 +1028,7 @@ def runPushArtifacts() {
     if (params.ARTIFACT_PUSH_JUNIT
             && params.PUBLISH_TEST_RESULTS
             && params.TEST_RUNNER == 'cargo-nextest') {
-        def junitPath = "${env.WORKSPACE}/test-results/junit.xml"
+        def junitPath = "${env.WS_POSIX}/test-results/junit.xml"
         if (fileExists(junitPath)) {
             shx "cp '${junitPath}' '${outDir}/junit.xml'"
             filesToPush << 'junit.xml'
@@ -979,7 +1040,7 @@ def runPushArtifacts() {
     if (params.ARTIFACT_PUSH_COVERAGE && params.COVERAGE_STANDALONE) {
         [['coverage/lcov.info', 'lcov.info'],
          ['coverage/sonar-coverage.xml', 'sonar-coverage.xml']].each { src, dst ->
-            def srcPath = "${env.WORKSPACE}/${src}"
+            def srcPath = "${env.WS_POSIX}/${src}"
             if (fileExists(srcPath)) {
                 shx "cp '${srcPath}' '${outDir}/${dst}'"
                 filesToPush << dst
@@ -1041,16 +1102,20 @@ def runGitRefCompare() {
         "COMPARE_TO_REF=${params.COMPARE_TO_REF}",
         "COMPARE_TO_PREV_TAG=${params.COMPARE_TO_PREV_TAG}",
         "OUTPUT_SUBDIR=${params.OUTPUT_SUBDIR}",
-        "SCAN_ROOT=${env.SCAN_ROOT ?: env.WORKSPACE}",
+        // POSIX-normalise both the scan root and the workspace so the bash body's
+        // git -C / analyze / diff get forward-slash paths on Windows. WS_POSIX
+        // overrides the ambient (backslash) $WORKSPACE that the agent injects.
+        "SCAN_ROOT=${(env.SCAN_ROOT ?: env.WORKSPACE)?.replace('\\', '/')}",
+        "WS_POSIX=${env.WS_POSIX}",
     ]) {
         shx '''
-            OUT="${WORKSPACE}/${OUTPUT_SUBDIR}"
+            OUT="${WS_POSIX}/${OUTPUT_SUBDIR}"
             # Honour the OS-aware BINARY exported by initEnv (carries .exe on
             # Windows); fall back to the POSIX default when it is unset.
-            BINARY="${BINARY:-${WORKSPACE}/target/release/oxide-sloc}"
+            BINARY="${BINARY:-${WS_POSIX}/target/release/oxide-sloc}"
             # Git operations target the scanned repo (workspace root for a self-scan,
-            # ./_target when TARGET_REPO_URL was checked out).
-            REPO="${SCAN_ROOT:-$WORKSPACE}"
+            # ./_target when TARGET_REPO_URL was checked out). Use the POSIX workspace.
+            REPO="${SCAN_ROOT:-$WS_POSIX}"
 
             # Resolve baseline ref
             if [ "${COMPARE_TO_PREV_TAG:-false}" = "true" ]; then
@@ -1078,7 +1143,7 @@ def runGitRefCompare() {
             fi
 
             echo "=== Scanning baseline: ${BASELINE_REF} ==="
-            WT_BASE="${WORKSPACE}/.wt-baseline"
+            WT_BASE="${WS_POSIX}/.wt-baseline"
             git -C "${REPO}" worktree add --detach "${WT_BASE}" "${BASELINE_REF}"
 
             "${BINARY}" analyze "${WT_BASE}" \
@@ -1101,7 +1166,10 @@ def runGitRefCompare() {
 
 def runPostSuccess() {
     try {
-        def outDir = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+        // POSIX-form (WS_POSIX == WORKSPACE on Unix). outDir feeds both Jenkins
+        // steps (readJSON/readFile/fileExists accept forward slashes) and shx
+        // bodies (the lcov awk + build-summary.py), so POSIX is correct for both.
+        def outDir = "${env.WS_POSIX}/${params.OUTPUT_SUBDIR}"
         def proj   = env.SLOC_PROJECT
                         ?: (params.SCAN_PATH?.trim()?.split('[/\\\\]') as List)?.last()
                         ?: 'project'
@@ -1294,7 +1362,8 @@ def runBitbucketNotify() {
     //    they work with or without the plugins and never fail the build.
     def proj      = env.SLOC_PROJECT ?: 'project'
     def reportUrl = env.BUILD_URL ? "${env.BUILD_URL}OxideSLOC_CI_Report_${proj}/" : ''
-    def outDir    = "${env.WORKSPACE}/${params.OUTPUT_SUBDIR}"
+    // POSIX-form for the shx body that runs notify-confluence.py (WS_POSIX == WORKSPACE on Unix).
+    def outDir    = "${env.WS_POSIX}/${params.OUTPUT_SUBDIR}"
     def bbState   = result == 'FAILURE' ? 'FAILED' : 'SUCCESSFUL'
 
     try {

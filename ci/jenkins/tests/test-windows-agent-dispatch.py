@@ -14,7 +14,11 @@ Jenkins / no Groovy compiler needed) but cover the load-bearing invariants:
     * initEnv() sets Unix values byte-identical to the old environment{} block,
       and on Windows PREPENDS the cache bin dir to the inherited PATH (never
       replaces it), normalises HOME<-USERPROFILE, and points BINARY/ARTIFACT_PATH
-      at the .exe.
+      at the .exe. Windows hardening (F4/F5/F8): cache root resolves
+      SLOC_CACHE_DIR -> HOME -> USERPROFILE -> WORKSPACE (no C:\\Users\\Default),
+      CARGO_HOME/RUSTUP_HOME/PATH are exported in forward-slash (POSIX) form, the
+      MinGW gcc dir (<gitroot>\\mingw64\\bin) is prepended to PATH, and WS_POSIX /
+      HISTORY_HOME_POSIX are exported for bash-facing path construction.
     * pyBin() provides a python3 -> python -> py (SLOC_PY override) fallback.
     * EVERY shell step goes through shx/shxStdout/shxStatus — no bare `sh '...'`
       / `sh("...")` call sites remain (the three inside the helper definitions
@@ -112,15 +116,39 @@ def test_helpers():
           '"${home}/.rust-cache/cargo/bin:/usr/local/bin:/usr/bin:/bin"' in src)
     check("helpers: initEnv Unix BINARY has no .exe",
           '"${env.WORKSPACE}/target/release/oxide-sloc"' in src)
-    # Windows PATH must PREPEND, not replace, the inherited PATH.
-    check("helpers: initEnv Windows PREPENDS cache bin to inherited PATH",
-          re.search(r"env\.PATH\s*=\s*\"\$\{home\}\\\\\.rust-cache\\\\cargo\\\\bin;\$\{env\.PATH\}\"",
-                    src) is not None,
-          "Windows PATH must be '<cache>;${env.PATH}' (prepend, keep inherited)")
+    # F4: Windows cache root resolution must prefer SLOC_CACHE_DIR, then
+    # HOME -> USERPROFILE -> WORKSPACE, and MUST NOT use the read-only
+    # 'C:\\Users\\Default' fallback anymore.
+    check("helpers: initEnv Windows honours SLOC_CACHE_DIR override",
+          "env.SLOC_CACHE_DIR" in src)
+    # Scan comment-stripped code so the explanatory comment that *documents* the
+    # removal (it names the old path) does not trip the guard.
+    check("helpers: initEnv Windows falls back to WORKSPACE (writable), not Default",
+          "C:\\\\Users\\\\Default" not in code,
+          "the read-only 'C:\\Users\\Default' cache fallback must be removed")
     check("helpers: initEnv normalises HOME<-USERPROFILE on Windows",
           "env.USERPROFILE" in src)
+    # F4: CARGO_HOME/RUSTUP_HOME/PATH must be exported in FORWARD-SLASH (POSIX) form
+    # on Windows so bash consumers (check-disk-space.sh du/find) don't choke.
+    check("helpers: initEnv Windows CARGO_HOME is POSIX (forward-slash) form",
+          '.rust-cache/cargo"' in src and 'cacheRootPosix' in src,
+          "Windows CARGO_HOME must be '<root>/.rust-cache/cargo' (forward slashes)")
+    check("helpers: initEnv Windows PATH prepends cache bin in POSIX form, keeps inherited",
+          re.search(r"env\.PATH\s*=\s*\"\$\{cacheRootPosix\}/\.rust-cache/cargo/bin;.*\$\{env\.PATH\}\"",
+                    src) is not None,
+          "Windows PATH must prepend '<root>/.rust-cache/cargo/bin;...;${env.PATH}'")
     check("helpers: initEnv Windows BINARY carries .exe",
           "oxide-sloc.exe" in src)
+    # F5: MinGW gcc/ld must be prepended to PATH (derived from resolveBash's Git root)
+    # so the non-login cargo build finds cc/gcc/ld for the windows-gnu target.
+    check("helpers: initEnv Windows prepends MinGW gcc dir (mingw64\\bin) to PATH",
+          "mingw64\\\\bin" in src and "resolveBash()" in src,
+          "must prepend <gitroot>\\mingw64\\bin (and usr\\bin) derived from resolveBash()")
+    # F8: POSIX-normalised WORKSPACE / history-home exported for bash-facing paths.
+    check("helpers: initEnv exports WS_POSIX for bash-facing path construction",
+          "env.WS_POSIX" in src)
+    check("helpers: initEnv exports a POSIX history-home",
+          "env.HISTORY_HOME_POSIX" in src)
 
     check("helpers: pyBin() defined with python3->python->py fallback",
           "def pyBin()" in src and "command -v python3" in src
@@ -175,6 +203,24 @@ def test_jenkinsfile():
     check("Jenkinsfile: no bare `sh` steps remain (all via h.shx/h.shxStdout/etc.)",
           not bare,
           "; ".join(f"L{n}:{t[:50]}" for n, t in bare))
+
+    # F3: timestamps() is a parse-time Timestamper plugin hard-dep — must be gone
+    # from options{} (a missing options directive can't be try/catch'd, like ansiColor).
+    check("Jenkinsfile: timestamps() removed from options{} (parse-time plugin dep)",
+          not re.search(r"^\s*timestamps\(\)", code, re.MULTILINE),
+          "timestamps() must be removed for minimal-controller compatibility")
+
+    # F5: the Build stage must unset CC (and CXX) so the airgap-devkit gcc can't
+    # conflict with the MinGW gcc the windows-gnu target links with.
+    check("Jenkinsfile: Build stage unsets CC/CXX",
+          re.search(r"unset\s+CC\s+CXX", code) is not None,
+          "the Build shx body must start with `unset CC CXX`")
+
+    # F7: cleanWs() must catch Throwable (a missing ws-cleanup plugin throws
+    # NoSuchMethodError, a java.lang.Error, which catch(Exception) would let escape).
+    check("Jenkinsfile: cleanWs() catches Throwable, not Exception",
+          re.search(r"cleanWs\(\)\s*\n\s*\}\s*catch\s*\(\s*Throwable", code) is not None,
+          "cleanWs must be guarded by catch (Throwable ...)")
 
 
 def main():

@@ -26,6 +26,7 @@ Each section maps to one Jenkins screen.
 13. [Optional agent setup — cargo-nextest (JUnit test results)](#13-optional-agent-setup--cargo-nextest-junit-test-results)
 14. [Optional agent setup — cargo-llvm-cov (coverage)](#14-optional-agent-setup--cargo-llvm-cov-coverage)
 15. [Troubleshooting](#15-troubleshooting)
+16. [Windows agents — known constraints](#16-windows-agents--known-constraints)
 
 ---
 
@@ -977,3 +978,71 @@ Your line coverage is below the `COVERAGE_THRESHOLD` value.  Either:
 - Set `COVERAGE_THRESHOLD = 0` to disable the gate.
 
 The console output shows the exact percentage and threshold for diagnosis.
+
+---
+
+## 16. Windows agents — known constraints
+
+The pipeline runs on locked-down / air-gapped **Windows** agents (its `.sh` scripts
+execute through Git Bash — install **Git for Windows** on the agent), but a corporate
+Windows agent has a few hard constraints an operator must plan for. Each item below is
+a real limitation of the platform, not of oxide-sloc.
+
+### MAX_PATH (260 characters)
+
+Windows caps most file paths at **260 characters** unless long-path support is enabled
+via the HKLM registry key `LongPathsEnabled` — an **admin-only** setting the operator
+may not have. Rust's `target/` tree nests deeply (`target\release\build\<crate>-<hash>\out\...`),
+so a long agent remote-root plus a long job name can push build paths past the limit and
+the compile fails with cryptic "path too long" / "No such file" errors.
+
+**Recommendation:** give the agent a **short remote root** (e.g. `C:\J`) and keep the
+**job name short** (e.g. `sloc`). This keeps `<root>\<job>\workspace\target\...` well
+under 260 characters without needing the HKLM long-path setting.
+
+### Seed job under Job DSL script-security
+
+`ci/jenkins/seed-job.groovy` reads `JOB_NAME` / `REPO_URL` / `REPO_BRANCH` via
+`System.getenv(...)` as a fallback. With **Job DSL script-security ON** (the default),
+`System.getenv` is a sandboxed call and is **rejected**. Two supported ways to run the seed:
+
+- **Script Console (admin, unsandboxed):** paste `seed-job.groovy` into
+  **Manage Jenkins → Script Console** and run it once. The Script Console is not
+  sandboxed, so `System.getenv` works.
+- **Job DSL seed job with String parameters:** add `JOB_NAME`, `REPO_URL`, and
+  `REPO_BRANCH` as **String parameters** on the seed job. When those bindings are
+  present the script uses them directly (`binding.hasVariable(...)`) and never reaches
+  the sandboxed `System.getenv` fallback — so it runs cleanly under script-security.
+
+`REPO_URL` is required either way (no hardcoded internet default). Air-gapped? Use a
+local mirror, e.g. `file:///srv/git/oxide-sloc.git`.
+
+### Test runner / coverage on Windows air-gap
+
+The prebuilt-binary installers for **cargo-nextest** (`get.nexte.st`) and
+**cargo-llvm-cov** (GitHub Releases) that `install-rust-cache.sh` uses are **Linux-only**.
+On a Windows air-gapped agent those tools cannot self-install, so the supported defaults are:
+
+- `TEST_RUNNER = cargo-test` (plain `cargo test`), and
+- **coverage off** (`COVERAGE_STANDALONE` unchecked).
+
+If you set `TEST_RUNNER = cargo-nextest` or enable coverage on Windows **without**
+pre-placing the Windows tool binaries in `%CARGO_HOME%\bin` (i.e. `<cacheroot>\.rust-cache\cargo\bin`),
+those stages go **UNSTABLE (yellow)**, not green — the build does not silently pass with a
+missing report. To use them, drop the Windows builds of `cargo-nextest.exe` /
+`cargo-llvm-cov.exe` into that bin directory ahead of time.
+
+### New operator knobs (environment variables)
+
+| Variable | Effect |
+|----------|--------|
+| `SLOC_CACHE_DIR` | Overrides the Rust cache root. On a Windows service account whose `HOME` / `USERPROFILE` profile is read-only or ACL-locked, set this to a writable directory. Resolution order is `SLOC_CACHE_DIR` → `HOME` → `USERPROFILE` → `WORKSPACE` (the last is always agent-writable). The cache lands at `<root>\.rust-cache\`. |
+| `SLOC_ALLOW_ONLINE_RUSTUP` | Set to `1` to permit `setup-toolchain.sh` to download rustup from the internet as a last resort. **Unset/`0` (default) fails fast** on an air-gapped agent instead of hanging on an unreachable `https://sh.rustup.rs`, with a message pointing at the committed `toolchain/` bundle, the persistent cache, or pinning to a seeded Linux agent via `AGENT_LABEL`. |
+| `SLOC_BASH` | Absolute path to a `bash.exe` if Git Bash is not auto-discovered. |
+| `SLOC_PY` | Overrides the Python interpreter (Git Bash usually has `python`, not `python3`). |
+
+On Windows, `setup-toolchain.sh` consumes the committed **Windows toolchain bundle**
+(`toolchain/rust-toolchain-windows-x64.tar.gz.*`, checksum-verified against
+`toolchain/checksums.sha256`) for a fully offline first build, so no network toolchain
+download is needed. Ensure the `toolchain/` directory is present in the checkout (it ships
+in the repo).

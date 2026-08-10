@@ -1,6 +1,15 @@
 # Normalize all text files to LF on commit (no CRLF in the repo)
 * text=auto eol=lf
 
+# Belt-and-suspenders: force LF for executable scripts regardless of content
+# sniffing. On Windows with core.autocrlf=true a CRLF-checked-out .sh is a hard
+# failure in Git Bash ("bad interpreter", "\r: command not found"), and the
+# Jenkins pipeline executes these scripts through Git Bash on Windows agents.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.py   text eol=lf
+*.groovy text eol=lf
+
 # Explicitly mark known binary file types globally
 *.png binary
 *.jpg binary
