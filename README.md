@@ -1,16 +1,24 @@
 # oxide-sloc
 
-[![CI](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/ci.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/ci.yml)
-[![Release](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml)
-[![Docker](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml/badge.svg)](https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml)
-[![Latest Release](https://img.shields.io/github/v/release/oxide-sloc/oxide-sloc?label=release&color=blue)](https://github.com/oxide-sloc/oxide-sloc/releases/latest)
-[![crates.io](https://badgen.net/crates/v/oxide-sloc?label=crates.io&color=orange)](https://crates.io/crates/oxide-sloc)
-[![codecov](https://codecov.io/gh/oxide-sloc/oxide-sloc/branch/main/graph/badge.svg)](https://codecov.io/gh/oxide-sloc/oxide-sloc)
-[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](./LICENSE)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12976/badge)](https://www.bestpractices.dev/en/projects/12976)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/oxide-sloc/oxide-sloc/badge)](https://securityscorecards.dev/viewer/?uri=github.com/oxide-sloc/oxide-sloc)
-[![docs.rs](https://img.shields.io/docsrs/oxide-sloc)](https://docs.rs/oxide-sloc)
-[![MCP Server](https://img.shields.io/badge/MCP-server-orange)](./mcp.json)
+<!--
+  Badges load live status from GitHub/shields/codecov when online. On an
+  air-gapped machine the live fetch fails and the browser's onerror handler
+  swaps in a committed static SVG from docs/badges/ instead of a broken image.
+  (GitHub strips onerror during sanitization, but GitHub is online, so the live
+  badge renders there regardless.) Refresh the fallbacks with
+  scripts/internal/gen-offline-badges.ps1 after a version bump.
+-->
+<a href="https://github.com/oxide-sloc/oxide-sloc/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/oxide-sloc/oxide-sloc/actions/workflows/ci.yml/badge.svg" onerror="this.onerror=null;this.src='docs/badges/ci.svg'"></a>
+<a href="https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml"><img alt="Release" src="https://github.com/oxide-sloc/oxide-sloc/actions/workflows/release.yml/badge.svg" onerror="this.onerror=null;this.src='docs/badges/release.svg'"></a>
+<a href="https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml"><img alt="Docker" src="https://github.com/oxide-sloc/oxide-sloc/actions/workflows/docker.yml/badge.svg" onerror="this.onerror=null;this.src='docs/badges/docker.svg'"></a>
+<a href="https://github.com/oxide-sloc/oxide-sloc/releases/latest"><img alt="Latest Release" src="https://img.shields.io/github/v/release/oxide-sloc/oxide-sloc?label=release&color=blue" onerror="this.onerror=null;this.src='docs/badges/version.svg'"></a>
+<a href="https://crates.io/crates/oxide-sloc"><img alt="crates.io" src="https://badgen.net/crates/v/oxide-sloc?label=crates.io&color=orange" onerror="this.onerror=null;this.src='docs/badges/crates.svg'"></a>
+<a href="https://codecov.io/gh/oxide-sloc/oxide-sloc"><img alt="codecov" src="https://codecov.io/gh/oxide-sloc/oxide-sloc/branch/main/graph/badge.svg" onerror="this.onerror=null;this.src='docs/badges/codecov.svg'"></a>
+<a href="./LICENSE"><img alt="License: AGPL-3.0-or-later" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg" onerror="this.onerror=null;this.src='docs/badges/license.svg'"></a>
+<a href="https://www.bestpractices.dev/en/projects/12976"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/12976/badge" onerror="this.onerror=null;this.src='docs/badges/ossf-bestpractices.svg'"></a>
+<a href="https://securityscorecards.dev/viewer/?uri=github.com/oxide-sloc/oxide-sloc"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/oxide-sloc/oxide-sloc/badge" onerror="this.onerror=null;this.src='docs/badges/ossf-scorecard.svg'"></a>
+<a href="https://docs.rs/oxide-sloc"><img alt="docs.rs" src="https://img.shields.io/docsrs/oxide-sloc" onerror="this.onerror=null;this.src='docs/badges/docs.svg'"></a>
+<a href="./mcp.json"><img alt="MCP Server" src="https://img.shields.io/badge/MCP-server-orange" onerror="this.onerror=null;this.src='docs/badges/mcp.svg'"></a>
 
 **oxide-sloc** is a Rust-based local code analysis tool — IEEE 1045-1992 SLOC analysis, unit test detection, and coverage reporting.
 
@@ -68,17 +76,17 @@ AI-native integration — particularly as an MCP tool callable by Claude, Copilo
 
 ## Screenshots
 
-![Home — navigation hub with quick-launch cards for every feature](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/home-page.png)
+![Home — navigation hub with quick-launch cards for every feature](docs/screenshots/home-page.png)
 
 | View Reports | Scan Delta |
 |---|---|
-| ![View Reports](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/view-reports.png) | ![Scan Delta](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/compare-delta.png) |
+| ![View Reports](docs/screenshots/view-reports.png) | ![Scan Delta](docs/screenshots/compare-delta.png) |
 | **Trend Reports** | **Test Metrics** |
-| ![Trend Reports](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/trend-reports.png) | ![Test Metrics](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/test-metrics.png) |
+| ![Trend Reports](docs/screenshots/trend-reports.png) | ![Test Metrics](docs/screenshots/test-metrics.png) |
 | **PDF Report** | **Excel Export** |
-| ![PDF Report](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/report-pdf.png) | ![Excel Export](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/export-excel.png) |
+| ![PDF Report](docs/screenshots/report-pdf.png) | ![Excel Export](docs/screenshots/export-excel.png) |
 
-![Per-run report — summary stat chips, export options, and submodule breakdown](https://raw.githubusercontent.com/oxide-sloc/oxide-sloc/main/docs/screenshots/report-summary.png)
+![Per-run report — summary stat chips, export options, and submodule breakdown](docs/screenshots/report-summary.png)
 
 ---
 

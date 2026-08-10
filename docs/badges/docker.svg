@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="118" height="20" role="img" aria-label="Docker : offline">
+  <title>Docker : offline</title>
+  <rect width="118" height="20" fill="#555"/>
+  <rect x="58" width="60" height="20" fill="#9f9f9f"/>
+  <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+    <text x="29" y="14" fill="#010101" fill-opacity=".3">Docker</text>
+    <text x="29" y="13">Docker</text>
+    <text x="88" y="14" fill="#010101" fill-opacity=".3">offline</text>
+    <text x="88" y="13">offline</text>
+  </g>
+</svg>
