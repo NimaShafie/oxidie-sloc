@@ -525,9 +525,16 @@ If you want the pipeline to trigger automatically:
 | SCM | **Git** |
 | Repository URL | `https://github.com/oxide-sloc/oxide-sloc.git` (or your fork/mirror URL) |
 | Credentials | Leave as `- none -` for public repos; select SSH or username/password credentials for private repos |
-| Branch Specifier | `*/main` |
+| Branch Specifier | `main` (a concrete ref — **not** `*/main`, see note) |
 | Script Path | `Jenkinsfile` |
 | ✓ Lightweight checkout | Check this box |
+
+> **Use a concrete branch ref (`main`), not the wildcard `*/main`.** With
+> lightweight checkout enabled, Jenkins loads the `Jenkinsfile` via the jgit-based
+> `GitSCMFileSystem`, which resolves the branch with `Repository.findRef()`. That
+> returns `null` for a wildcard spec, throwing a `NullPointerException` at
+> Jenkinsfile load before the pipeline even starts. A concrete ref (`main` or
+> `refs/heads/main`) works for both lightweight and heavyweight checkout.
 
 > **Air-gapped / local repo:** Use `file:///absolute/path/to/oxide-sloc` as the
 > Repository URL for a locally cloned copy.
@@ -589,8 +596,9 @@ From this point on, all configuration parameters are visible in the build form.
    > **blank** to reuse the SCM this job was configured from — no internet URL is hardcoded,
    > so an air-gapped controller pointed at a local mirror just works. It resolves in order:
    > `REPO_URL` build parameter → `REPO_URL` environment variable (e.g. sourced from
-   > `ci/jenkins/.env`) → the job's own SCM. `REPO_BRANCH` (default `*/main`) sets the ref
-   > when you supply an explicit `REPO_URL`.
+   > `ci/jenkins/.env`) → the job's own SCM. `REPO_BRANCH` (default `main`) sets the ref
+   > when you supply an explicit `REPO_URL` — use a concrete ref, not the wildcard
+   > `*/main`, which NPEs under lightweight (jgit) checkout.
 
    **To enable unit test results** (requires cargo-nextest on the agent — see Step 13):
 

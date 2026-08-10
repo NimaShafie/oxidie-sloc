@@ -247,8 +247,9 @@ Bitbucket status and Confluence page anyway (Tier-3).
   (a Jenkins global property, typically sourced from `ci/jenkins/.env`) → the
   job's own configured SCM (`checkout scm`). Leave it **blank on an air-gapped
   controller** whose job already points at a local mirror and the build never
-  reaches out to github.com. `REPO_BRANCH` (default `*/main`) overrides the ref
-  when you set an explicit `REPO_URL`.
+  reaches out to github.com. `REPO_BRANCH` (default `main`) overrides the ref
+  when you set an explicit `REPO_URL`. Use a concrete ref, not the wildcard
+  `*/main`: lightweight (jgit) SCM checkout NPEs on a wildcard at Jenkinsfile load.
 - `SCAN_PATH` is resolved **inside the target repo** when `TARGET_REPO_URL` is
   set. Blank scans the whole repo; a bad subtree fails fast with a clear message.
 - Serve Jenkins over HTTPS (`ci/jenkins/https/`) before sending tokens over the
