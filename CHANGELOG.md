@@ -10,6 +10,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.14] — 2026-08-11
+
+### Fixed
+
+- **Windows air-gapped install (`install.ps1`)**: the native PowerShell installer now tolerates
+  rustup-proxy symlink errors while extracting the bundled toolchain, so a locked-down Windows
+  host without symlink privilege no longer fails toolchain setup.
+- **MSVC target linker check**: `install.ps1` only requires a MinGW linker for GNU targets; MSVC
+  targets no longer error out looking for a linker they do not use.
+
+### CI / Build
+
+- **Windows CI without a Git install**: added a no-install PortableGit path plus the native,
+  bash-free PowerShell installer; corrected stale `vendor.tar.xz` references in the docs (the
+  vendor archive is gzip `vendor.tar.gz.*`).
+- **Jenkins air-gapped agents**: pinned `RUSTUP_TOOLCHAIN` to the exact bundled toolchain name so
+  sealed-network agents never try to sync the `1.97` channel manifest online.
+
+---
+
 ## [1.6.13] — 2026-08-10
 
 ### Fixed
