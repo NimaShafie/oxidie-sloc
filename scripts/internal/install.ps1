@@ -272,14 +272,27 @@ if (-not $haveCargo) {
     Ok 'Rust toolchain bootstrapped at .tools\'
 }
 
-# ── 4. Ensure a C linker (MinGW gcc/ld) is available ─────────────────────────
-$mingw = Resolve-MingwBin
-if ($mingw) {
-    if (($env:PATH -split ';') -notcontains $mingw) { $env:PATH = "$mingw;$env:PATH" }
-    Ok "MinGW linker: $mingw"
+# ── 4. Ensure a C linker for the ACTIVE target ───────────────────────────────
+# The bundled toolchain is windows-gnu (links with MinGW gcc/ld). But a Rust
+# toolchain already on PATH may target MSVC instead, which links with link.exe
+# from the MSVC Build Tools -- no MinGW needed. Decide from rustc's host triple
+# (after any bootstrap above, `rustc` is the one we'll actually build with).
+$rustHost = ''
+try {
+    $rustHost = ((& rustc -vV 2>$null) | Where-Object { $_ -match '^host:' } |
+        Select-Object -First 1) -replace '^host:\s*', ''
+} catch {}
+if ($rustHost -match 'msvc') {
+    Ok "Toolchain targets $rustHost -- using its native MSVC linker (no MinGW needed)."
 } else {
-    Die @"
-No C linker (MinGW gcc) found -- the x86_64-pc-windows-gnu build cannot link without one.
+    # GNU target (bundled toolchain, or a gnu host) -- require a MinGW linker.
+    $mingw = Resolve-MingwBin
+    if ($mingw) {
+        if (($env:PATH -split ';') -notcontains $mingw) { $env:PATH = "$mingw;$env:PATH" }
+        Ok "MinGW linker: $mingw"
+    } else {
+        Die @"
+No C linker (MinGW gcc) found -- the $(if($rustHost){$rustHost}else{'x86_64-pc-windows-gnu'}) build cannot link without one.
 This is the one requirement PowerShell cannot supply. Choose one:
   * Stage a PortableGit (also gives you the linker), then re-run:
         powershell -File ci\jenkins\stage-portable-git.ps1 <PortableGit-*.7z.exe>
@@ -288,6 +301,7 @@ This is the one requirement PowerShell cannot supply. Choose one:
         powershell -File scripts\internal\install.ps1 -MingwBin 'C:\path\to\mingw64\bin'
   * Or set `$env:SLOC_MINGW_BIN to that folder.
 "@
+    }
 }
 
 # ── 5. Reassemble + verify vendor sources, write .cargo\config.toml ──────────
