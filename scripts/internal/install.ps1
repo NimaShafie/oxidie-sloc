@@ -231,9 +231,27 @@ if (-not $haveCargo) {
             $tcTar = $tcParts[0]
         }
         Info 'Extracting toolchain archive...'
-        # bsdtar may fail to create the rustup proxy hardlinks/symlinks; tolerate
-        # and patch below (mirrors install.sh).
-        & $TarExe -xzf $tcTar -C $ToolsDir 2>$null
+        # bsdtar (Windows tar.exe) cannot create the rustup proxy symlinks: in the
+        # bundle cargo/bin/cargo.exe, rustc.exe, ... are POSIX symlinks to rustup.exe,
+        # so tar emits "Can't create ... Invalid argument" per proxy and exits non-zero.
+        # This is EXPECTED and benign — bsdtar still extracts every real file, and we
+        # Let cmd.exe perform the stderr redirection so PowerShell never sees tar's
+        # native stderr as ErrorRecords (pwsh 7.3+'s
+        # $PSNativeCommandUseErrorActionPreference would otherwise make the non-zero
+        # exit terminating AND serialize its own formatted error wrapper into any
+        # `2>file` capture). With `cmd /c "... 2>file"` the file gets RAW tar text.
+        # Then surface only errors that are NOT the expected proxy noise.
+        $errFile = [System.IO.Path]::GetTempFileName()
+        $tarCmd = '"{0}" -xzf "{1}" -C "{2}" 2>"{3}"' -f $TarExe, $tcTar, $ToolsDir, $errFile
+        cmd /c $tarCmd | Out-Null
+        $tarErr = (Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue) -join "`n"
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+        $realErr = ($tarErr -split "`n") | Where-Object {
+            $_.Trim() -and
+            $_ -notmatch "Can't create" -and $_ -notmatch 'Invalid argument' -and
+            $_ -notmatch 'symlink' -and $_ -notmatch 'Error exit delayed'
+        }
+        if ($realErr) { $realErr | ForEach-Object { Warn ("tar: " + $_.Trim()) } }
     } finally {
         if ($tcTar -ne $tcParts[0] -and (Test-Path $tcTar)) { Remove-Item -LiteralPath $tcTar -Force -ErrorAction SilentlyContinue }
     }
