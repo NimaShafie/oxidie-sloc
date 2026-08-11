@@ -34,8 +34,6 @@ BLANK = prs.slide_layouts[6]   # totally blank layout
 # ─────────────────────────────────────────────────────────────────────────────
 
 def add_rect(slide, left, top, width, height, fill_rgb=None, line_rgb=None, line_width=Pt(0)):
-    from pptx.util import Pt as _Pt
-    from pptx.oxml.ns import qn
     shape = slide.shapes.add_shape(1, left, top, width, height)   # MSO_SHAPE_TYPE.RECTANGLE = 1
     fill = shape.fill
     if fill_rgb:
@@ -73,7 +71,6 @@ def add_text(slide, text, left, top, width, height,
 
 def add_para(tf, text, font_size=Pt(16), bold=False, color=CHARCOAL,
              align=PP_ALIGN.LEFT, space_before=Pt(4), indent_level=0):
-    from pptx.util import Pt as _Pt
     p = tf.add_paragraph()
     p.alignment = align
     p.level = indent_level
@@ -136,9 +133,9 @@ def bullet_block(slide, items, left, top, width, height,
 # ─────────────────────────────────────────────────────────────────────────────
 
 slides_data = [
-    # 0 – Cover
+    # 0 - Cover
     {"type": "cover"},
-    # 1 – What is SLOC?
+    # 1 - What is SLOC?
     {"type": "content",
      "title": "What is SLOC?",
      "subtitle": "Understanding the fundamental metric",
@@ -150,7 +147,7 @@ slides_data = [
          "Standardised by IEEE 1045-1992 for consistent, reproducible measurement",
      ],
      "note": "SLOC is not a measure of productivity — it is a measure of codebase size and growth."},
-    # 2 – Why Measure SLOC?
+    # 2 - Why Measure SLOC?
     {"type": "two_col",
      "title": "Why Measure SLOC?",
      "col1_title": "For Teams & Managers",
@@ -169,7 +166,7 @@ slides_data = [
          "Detect unexpectedly large files or modules",
          "Generate auditable metrics for compliance reports",
      ]},
-    # 3 – Introducing oxide-sloc
+    # 3 - Introducing oxide-sloc
     {"type": "highlight",
      "title": "Introducing oxide-sloc",
      "tagline": "A fast, air-gapped-capable SLOC workbench built for enterprise teams",
@@ -180,10 +177,10 @@ slides_data = [
          ("Rich Reports", "HTML, PDF, CSV, Excel — beautiful charts included"),
          ("CI-Native", "GitHub Actions, Jenkins, GitLab CI — drop-in integration"),
      ]},
-    # 4 – Key Features Overview
+    # 4 - Key Features Overview
     {"type": "feature_grid",
      "title": "Feature Highlights"},
-    # 5 – The Web UI
+    # 5 - The Web UI
     {"type": "content",
      "title": "Localhost Web Interface",
      "subtitle": "No installation required — open your browser and start scanning",
@@ -197,11 +194,11 @@ slides_data = [
          "Dark mode, 5 colour themes, and light/dark toggle built in",
      ],
      "note": "The web UI binds to 127.0.0.1 by default — only your machine can reach it."},
-    # 6 – Who Benefits?
+    # 6 - Who Benefits?
     {"type": "who_benefits"},
-    # 7 – How Often Should You Run It?
+    # 7 - How Often Should You Run It?
     {"type": "cadence"},
-    # 8 – Integrations
+    # 8 - Integrations
     {"type": "content",
      "title": "Integrations & Delivery",
      "subtitle": "Get SLOC data wherever your team already works",
@@ -214,7 +211,7 @@ slides_data = [
          "REST API:  /api/metrics/latest for dashboards, Grafana, Power BI",
          "Webhook:  POST JSON to any HTTPS endpoint for custom pipelines",
      ]},
-    # 9 – Air-Gapped / Secure Environments
+    # 9 - Air-Gapped / Secure Environments
     {"type": "content",
      "title": "Built for Secure Environments",
      "subtitle": "Full functionality with no internet access and no pre-installed tools",
@@ -228,9 +225,9 @@ slides_data = [
          "IP rate limiting and security headers enabled by default",
      ],
      "note": "Designed for air-gapped labs and corporate environments with strict egress controls."},
-    # 10 – Getting Started
+    # 10 - Getting Started
     {"type": "getting_started"},
-    # 11 – Thank you / Q&A
+    # 11 - Thank you / Q&A
     {"type": "closing"},
 ]
 

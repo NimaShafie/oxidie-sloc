@@ -53,10 +53,13 @@ fi
 
 # Parse flags
 OPEN_FIREWALL=false
+# --no-auth is the default; accepted explicitly for UX. The real gate is UNDERSTAND_NO_AUTH.
 NO_AUTH=false
 WITH_AUTH=false
 QUIET=false
 UNDERSTAND_NO_AUTH=false
+# NO_AUTH is assigned by --no-auth below but inert; the gate is UNDERSTAND_NO_AUTH (see note above).
+# shellcheck disable=SC2034
 for arg in "$@"; do
     case "$arg" in
         --open-firewall) OPEN_FIREWALL=true ;;
@@ -700,7 +703,8 @@ do_launch_cargo() {
 
     local tmpout
     tmpout="$(mktemp)"
-    local LOG_FILE="$LOG_DIR/serve-server-$(date +%Y-%m-%d-%H-%M-%S).log"
+    local LOG_FILE
+    LOG_FILE="$LOG_DIR/serve-server-$(date +%Y-%m-%d-%H-%M-%S).log"
 
     local total_pkgs=0
     if [[ -f "$REPO_ROOT/Cargo.lock" ]]; then

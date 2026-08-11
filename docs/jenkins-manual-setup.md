@@ -690,7 +690,7 @@ After a successful build, confirm each feature is wired correctly:
 - Transient failures are retried once before marking as failed (`.config/nextest.toml`).
 
 ### Coverage Report (Coverage plugin + HTML Publisher)
-- To enable: check `COVERAGE_STANDALONE` (opt-in — it recompiles instrumented, adding ~4–5 min/build, so it is off by default).
+- To enable: check `COVERAGE_STANDALONE` (opt-in — it recompiles instrumented, adding ~4-5 min/build, so it is off by default).
 - Requires cargo-llvm-cov + `llvm-tools-preview` on the agent (see [Step 14](#14-optional-agent-setup--cargo-llvm-cov-coverage)).
 - After a successful coverage build:
   - The build page shows **line %, branch %, function %** from the Coverage plugin.

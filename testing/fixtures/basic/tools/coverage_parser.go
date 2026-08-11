@@ -20,7 +20,7 @@ type FileRecord struct {
 	FuncsHit      int
 }
 
-// LinePct returns the line coverage percentage (0–100).
+// LinePct returns the line coverage percentage (0-100).
 func (r *FileRecord) LinePct() float64 {
 	if r.LinesFound == 0 {
 		return 0.0
@@ -28,7 +28,7 @@ func (r *FileRecord) LinePct() float64 {
 	return float64(r.LinesHit) / float64(r.LinesFound) * 100.0
 }
 
-// BranchPct returns the branch coverage percentage (0–100).
+// BranchPct returns the branch coverage percentage (0-100).
 func (r *FileRecord) BranchPct() float64 {
 	if r.BranchesFound == 0 {
 		return 0.0

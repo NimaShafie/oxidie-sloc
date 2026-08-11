@@ -107,7 +107,7 @@ bash ci/jenkins/bundle-rust-toolchain.sh
 # outputs: rust-toolchain-bundle.tar.xz + rust-toolchain-bundle.tar.xz.sha256
 ```
 
-Because the bundle is typically 200–350 MB, split it into ≤45 MB parts before committing:
+Because the bundle is typically 200-350 MB, split it into ≤45 MB parts before committing:
 
 ```bash
 split -b 45m rust-toolchain-bundle.tar.xz rust-toolchain-bundle.tar.xz.

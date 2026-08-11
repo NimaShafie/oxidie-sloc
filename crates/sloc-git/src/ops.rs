@@ -108,21 +108,31 @@ fn hostkey(host: &str) -> String {
 ///
 /// Not cached: env is read live so the value is correct under runtime changes and the
 /// unit tests can mutate it. Cheap relative to a network clone.
-fn resolve_credential(host: &str) -> Option<GitCredential> {
-    let key = hostkey(host);
-    if let Ok(v) = std::env::var(format!("SLOC_GIT_CRED_{key}"))
-        && let Some((user, token)) = v.split_once(':')
-        && !token.is_empty()
-    {
-        return Some(GitCredential::Https {
-            user: user.to_owned(),
-            token: token.to_owned(),
-        });
+fn resolve_credential(host: &str, port: Option<u16>) -> Option<GitCredential> {
+    // Try the port-qualified key first (`SLOC_GIT_CRED_HOST_7990`) so two instances
+    // on the same host but different ports can carry distinct credentials, then the
+    // bare-host key (`SLOC_GIT_CRED_HOST`). The port form matches the documented
+    // `git.corp:7990 → GIT_CORP_7990` convention; without it the port suffix was dead.
+    let mut keys: Vec<String> = Vec::with_capacity(2);
+    if let Some(pt) = port {
+        keys.push(hostkey(&format!("{host}:{pt}")));
     }
-    if let Ok(p) = std::env::var(format!("SLOC_GIT_SSHKEY_{key}"))
-        && !p.trim().is_empty()
-    {
-        return Some(GitCredential::Ssh { key_path: p });
+    keys.push(hostkey(host));
+    for key in &keys {
+        if let Ok(v) = std::env::var(format!("SLOC_GIT_CRED_{key}"))
+            && let Some((user, token)) = v.split_once(':')
+            && !token.is_empty()
+        {
+            return Some(GitCredential::Https {
+                user: user.to_owned(),
+                token: token.to_owned(),
+            });
+        }
+        if let Ok(p) = std::env::var(format!("SLOC_GIT_SSHKEY_{key}"))
+            && !p.trim().is_empty()
+        {
+            return Some(GitCredential::Ssh { key_path: p });
+        }
     }
     cred_from_file(host)
 }
@@ -197,8 +207,8 @@ struct CredInjection {
     env: Vec<(String, String)>,
 }
 
-fn cred_injection(host: &str) -> CredInjection {
-    match resolve_credential(host) {
+fn cred_injection(host: &str, port: Option<u16>) -> CredInjection {
+    match resolve_credential(host, port) {
         Some(GitCredential::Https { user, token }) => CredInjection {
             config: vec![
                 "credential.helper=".to_owned(),
@@ -208,15 +218,30 @@ fn cred_injection(host: &str) -> CredInjection {
             ],
             env: vec![("GIT_U".to_owned(), user), ("GIT_P".to_owned(), token)],
         },
-        Some(GitCredential::Ssh { key_path }) => CredInjection {
-            config: Vec::new(),
-            env: vec![(
-                "GIT_SSH_COMMAND".to_owned(),
-                format!("ssh -i \"{key_path}\" -o IdentitiesOnly=yes -o BatchMode=yes"),
-            )],
-        },
+        Some(GitCredential::Ssh { key_path }) => {
+            let mut ssh = format!("ssh -i \"{key_path}\" -o IdentitiesOnly=yes -o BatchMode=yes");
+            // Default: strict host-key checking (first contact with an unseeded
+            // known_hosts fails, matching the non-interactive model). Opt in to
+            // trust-on-first-use with SLOC_GIT_SSH_ACCEPT_NEW=1.
+            if ssh_accept_new() {
+                ssh.push_str(" -o StrictHostKeyChecking=accept-new");
+            }
+            CredInjection {
+                config: Vec::new(),
+                env: vec![("GIT_SSH_COMMAND".to_owned(), ssh)],
+            }
+        }
         None => CredInjection::default(),
     }
+}
+
+/// Opt-in trust-on-first-use for SSH clones: when set, `StrictHostKeyChecking=accept-new`
+/// is added to the injected SSH command so a first contact with a host absent from
+/// `known_hosts` records its key instead of failing. Default OFF keeps strict checking —
+/// pre-seed `known_hosts` (e.g. via `ssh-keyscan`) on a fresh agent otherwise.
+fn ssh_accept_new() -> bool {
+    std::env::var("SLOC_GIT_SSH_ACCEPT_NEW")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 // ── offline / local-source import gate ───────────────────────────────────────────
@@ -665,6 +690,33 @@ fn port_of_git_url(url: &str) -> Option<u16> {
     })
 }
 
+/// The EXPLICIT `:port` from a git URL authority, or `None` when the URL carries no
+/// port. Unlike [`port_of_git_url`], no scheme default is substituted, and scp-like
+/// `git@host:path` is treated as port-less (the part after `:` is a path). Used only
+/// to build the optional port-qualified credential key so two instances on the same
+/// host but different ports resolve distinct credentials.
+fn explicit_port_of_git_url(url: &str) -> Option<u16> {
+    let u = url.trim();
+    if u.starts_with("git@") {
+        return None;
+    }
+    let (_scheme, after_scheme) = u.split_once("://")?;
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    authority.strip_prefix('[').map_or_else(
+        || {
+            authority
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+        },
+        |stripped| {
+            stripped
+                .split_once("]:")
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+        },
+    )
+}
+
 /// Known cloud-metadata / instance-data hostnames that must never be reachable.
 const BLOCKED_METADATA_HOSTNAMES: &[&str] = &[
     "metadata.google.internal",
@@ -772,7 +824,7 @@ fn clone_or_fetch_remote(url: &str, dest: &Path) -> Result<()> {
     let mut cfg = network_git_config();
     // Per-host credential from the registry (HTTPS helper config and/or the secret env).
     let inj = host_of_git_url(url)
-        .map(|h| cred_injection(&h))
+        .map(|h| cred_injection(&h, explicit_port_of_git_url(url)))
         .unwrap_or_default();
     cfg.extend(inj.config.iter().cloned());
     let env: Vec<(&str, &str)> = inj
@@ -1031,7 +1083,7 @@ fn cred_env_for_repo(repo: &Path) -> Vec<(String, String)> {
     let Some(host) = host_of_git_url(&url) else {
         return Vec::new();
     };
-    cred_injection(&host).env
+    cred_injection(&host, explicit_port_of_git_url(&url)).env
 }
 
 /// Remove a worktree previously created with [`create_worktree`].
@@ -1801,7 +1853,7 @@ mod tests {
         let key = format!("SLOC_GIT_CRED_{}", hostkey(host));
         // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
         unsafe { std::env::set_var(&key, "alice:secrettoken") };
-        let cred = resolve_credential(host);
+        let cred = resolve_credential(host, None);
         // SAFETY: see above.
         unsafe { std::env::remove_var(&key) };
         match cred {
@@ -1820,7 +1872,7 @@ mod tests {
         let key = format!("SLOC_GIT_SSHKEY_{}", hostkey(host));
         // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
         unsafe { std::env::set_var(&key, "/home/u/.ssh/id_ed25519") };
-        let cred = resolve_credential(host);
+        let cred = resolve_credential(host, None);
         // SAFETY: see above.
         unsafe { std::env::remove_var(&key) };
         match cred {
@@ -1834,7 +1886,7 @@ mod tests {
     #[test]
     fn resolve_credential_none_falls_through() {
         // No registry entry → None, so git falls back to its own credential resolution.
-        assert!(resolve_credential("no-such-cred-host.invalid").is_none());
+        assert!(resolve_credential("no-such-cred-host.invalid", None).is_none());
     }
 
     #[test]
@@ -1844,7 +1896,7 @@ mod tests {
         let key = format!("SLOC_GIT_CRED_{}", hostkey(host));
         // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
         unsafe { std::env::set_var(&key, "bob:tok123") };
-        let inj = cred_injection(host);
+        let inj = cred_injection(host, None);
         // SAFETY: see above.
         unsafe { std::env::remove_var(&key) };
 
@@ -1864,6 +1916,74 @@ mod tests {
         );
         assert!(inj.env.iter().any(|(k, v)| k == "GIT_U" && v == "bob"));
         assert!(inj.env.iter().any(|(k, v)| k == "GIT_P" && v == "tok123"));
+    }
+
+    #[test]
+    fn resolve_credential_port_qualified_key_wins() {
+        let _g = env_lock();
+        let host = "cred-port-test.example";
+        let port_key = format!("SLOC_GIT_CRED_{}", hostkey(&format!("{host}:7990")));
+        let bare_key = format!("SLOC_GIT_CRED_{}", hostkey(host));
+        // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
+        unsafe {
+            std::env::set_var(&port_key, "svc-port:porttoken");
+            std::env::set_var(&bare_key, "svc-bare:baretoken");
+        }
+        let with_port = resolve_credential(host, Some(7990));
+        let without_port = resolve_credential(host, None);
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var(&port_key);
+            std::env::remove_var(&bare_key);
+        }
+        match with_port {
+            Some(GitCredential::Https { user, .. }) => assert_eq!(user, "svc-port"),
+            _ => panic!("port-qualified key should win when a port is present"),
+        }
+        match without_port {
+            Some(GitCredential::Https { user, .. }) => assert_eq!(user, "svc-bare"),
+            _ => panic!("bare-host key should resolve when no port is given"),
+        }
+    }
+
+    #[test]
+    fn resolve_credential_falls_back_to_bare_when_only_bare_key_set() {
+        let _g = env_lock();
+        let host = "cred-fallback-test.example";
+        let bare_key = format!("SLOC_GIT_CRED_{}", hostkey(host));
+        // SAFETY: single-threaded under ENV_LOCK; removed before the guard drops.
+        unsafe { std::env::set_var(&bare_key, "svc:tok") };
+        // A port is supplied but only the bare-host key exists → it is still used.
+        let cred = resolve_credential(host, Some(7990));
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(&bare_key) };
+        assert!(matches!(cred, Some(GitCredential::Https { .. })));
+    }
+
+    #[test]
+    fn explicit_port_of_git_url_extracts_or_none() {
+        assert_eq!(
+            explicit_port_of_git_url("https://git.corp:7990/team/repo.git"),
+            Some(7990)
+        );
+        assert_eq!(
+            explicit_port_of_git_url("https://git.corp/team/repo.git"),
+            None
+        );
+        assert_eq!(
+            explicit_port_of_git_url("ssh://git@host:2222/repo.git"),
+            Some(2222)
+        );
+        // scp-like: the segment after ':' is a path, not a port.
+        assert_eq!(
+            explicit_port_of_git_url("git@github.com:owner/repo.git"),
+            None
+        );
+        assert_eq!(
+            explicit_port_of_git_url("https://[fe80::1]:443/repo"),
+            Some(443)
+        );
+        assert_eq!(explicit_port_of_git_url("https://[fe80::1]/repo"), None);
     }
 
     // ── source classification / normalize passthrough ─────────────────────────

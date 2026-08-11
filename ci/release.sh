@@ -9,7 +9,7 @@ TARGET="${1:-}"
 # available in the musl static build environment or cross-compile sysroots.
 # macOS and Windows have native API backends that need no extra system libs.
 case "$TARGET" in
-    *-linux-*|*-unknown-linux-*)
+    *-linux-*)
         FEATURES_FLAG="--no-default-features"
         ;;
     *)

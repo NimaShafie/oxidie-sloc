@@ -167,7 +167,7 @@ pub struct AnalysisConfig {
     /// Default: true.
     #[serde(default = "default_true")]
     pub style_analysis_enabled: bool,
-    /// Minimum dominant-guide adherence score (0–100) below which a file is flagged in the
+    /// Minimum dominant-guide adherence score (0-100) below which a file is flagged in the
     /// per-file style table. 0 = no threshold / all files shown without warning. Default: 0.
     #[serde(default)]
     pub style_score_threshold: u8,

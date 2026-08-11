@@ -48,7 +48,6 @@ PROJ_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\([^"]*\)".*/
 
 # ── Target selection ─────────────────────────────────────────────────────────
 
-HOST_MACHINE=$(uname -m 2>/dev/null || echo x86_64)
 case "${1:-auto}" in
     linux-x86_64|auto)
         RUST_HOST_TARGET="x86_64-unknown-linux-gnu"

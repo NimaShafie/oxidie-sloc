@@ -223,9 +223,9 @@ Legend: **App** = via web UI/REST on `sloc-web`; **CI** = via a Jenkins build.
 
 | ID | Tier | Expectation |
 |---|---|---|
-| D1 | **1 – system admin** | All of A–C pass; plugin path (C5) exercised; can also install a Marketplace app if desired (not required). |
-| D2 | **2 – project/space admin** | A–C pass **without** installing any app; page/attachment/status all succeed with space-admin + project-admin + `repository:write`. Cannot install apps — confirm the REST path is what's exercised. |
-| D3 | **3 – no admin** | A–C pass using only **Add Page** (Confluence) + **Repo Write** (Bitbucket) + a personal token; **no** Jenkins plugin present (plugin path logs "skipped", REST path succeeds). Any failure must trace to a missing content/repo permission (provisioning), not to code. |
+| D1 | **1 - system admin** | All of A-C pass; plugin path (C5) exercised; can also install a Marketplace app if desired (not required). |
+| D2 | **2 - project/space admin** | A-C pass **without** installing any app; page/attachment/status all succeed with space-admin + project-admin + `repository:write`. Cannot install apps — confirm the REST path is what's exercised. |
+| D3 | **3 - no admin** | A-C pass using only **Add Page** (Confluence) + **Repo Write** (Bitbucket) + a personal token; **no** Jenkins plugin present (plugin path logs "skipped", REST path succeeds). Any failure must trace to a missing content/repo permission (provisioning), not to code. |
 
 ---
 
@@ -248,7 +248,7 @@ The integration is production-ready when **all** hold for every tier under test:
 
 ## 5a. Real end-to-end pipeline verification (operator runbook)
 
-Groups A–D above drive `runBitbucketNotify()` and the two REST scripts directly.
+Groups A-D above drive `runBitbucketNotify()` and the two REST scripts directly.
 This section closes the one gap that isolated testing cannot: a **full green
 `oxide-sloc` pipeline build on a real agent**, where the scan → report →
 `post { always }` → notify chain fires end-to-end with real params + credentials.

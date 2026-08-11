@@ -38,7 +38,7 @@ mode**, or **from Jenkins/CI**.
   Bitbucket Cloud — including self-hosted enterprise instances on any hostname — are normalized to
   a clone URL automatically. SSH (`git@host:…`, `ssh://…`) and `git://` are also accepted.
 - **Internal IPs are allowed.** RFC 1918 / IPv6 ULA private addresses (10.x, 192.168.x,
-  172.16–31.x, `fd00::/8`) are permitted, so an internal instance on a corporate VLAN clones
+  172.16-31.x, `fd00::/8`) are permitted, so an internal instance on a corporate VLAN clones
   directly. Only loopback, link-local, and cloud-metadata targets are blocked.
 - **All three run modes accept a remote target** — CLI `git-scan` / `git-compare` / `watch`, the
   web **Git Browser** (`/git-browser`, `/api/git/*`) and the `git_repo` scan field, and the
@@ -78,6 +78,12 @@ export SLOC_GIT_CRED_BITBUCKET_INSTANCE2_COM="svc-scanner:ATBB…token…"
 export SLOC_GIT_SSHKEY_GIT_CORP="/home/scanner/.ssh/id_ed25519_corp"
 ```
 
+**Ports.** When the clone URL carries an explicit port (e.g.
+`https://git.corp:7990/team/repo.git`), the **port-qualified** key
+(`SLOC_GIT_CRED_GIT_CORP_7990`) is tried first, then the **bare-host** key
+(`SLOC_GIT_CRED_GIT_CORP`). Use the port form only when two instances share a
+hostname but differ by port; otherwise the bare-host key applies to every port.
+
 Provider username hints for the HTTPS form:
 
 | Provider | Username to use |
@@ -108,6 +114,24 @@ existing setups keep working with no changes.
 > **HOSTKEY collision note.** The mapping is lossy: `a.b.com`, `a-b.com`, and `a_b.com` all map to
 > `A_B_COM`. If your instances differ only by punctuation, use `SLOC_GIT_CRED_FILE` (it keys on the
 > exact hostname).
+
+### SSH host-key verification (fresh agents)
+
+SSH clones use `BatchMode=yes` and **strict** host-key checking, so a first contact with a host
+that isn't yet in `known_hosts` fails with an opaque `Host key verification failed` (Jenkins) or
+`could not read from remote repository` / "check access rights" (CLI) — the key was never the
+problem. On a fresh agent, seed the host key once before scanning:
+
+```bash
+ssh-keyscan -p 22 git.corp >> ~/.ssh/known_hosts   # use -p <port> for a non-standard SSH port
+```
+
+On Jenkins, configure **Manage Jenkins → Security → Git Host Key Verification Configuration**
+(e.g. "Accept first connection" or a known-hosts file) instead.
+
+If you accept trust-on-first-use, set `SLOC_GIT_SSH_ACCEPT_NEW=1` — oxide-sloc then adds
+`StrictHostKeyChecking=accept-new` to its SSH command so the first connection records the host key
+instead of failing. The default stays strict; only opt in on trusted networks.
 
 ---
 

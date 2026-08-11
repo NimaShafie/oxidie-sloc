@@ -630,17 +630,28 @@ pipeline {
                     }
                     if (params.TARGET_REPO_URL?.trim()) {
                         def ref = params.TARGET_REF?.trim() ?: 'main'
-                        // Accept a bare branch/tag (map to origin) or an explicit ref/SHA.
-                        def branchSpec = (ref ==~ /^[0-9a-fA-F]{7,40}$/ || ref.contains('/')) ? ref : "*/${ref}"
+                        // A bare name (e.g. "v1.1") may be a branch OR a tag. Fetch both
+                        // heads and tags via an explicit refspec, and offer both
+                        // resolutions — the git plugin builds the first that resolves to a
+                        // revision. A SHA or an explicit ref path ("refs/…", "origin/…")
+                        // is used verbatim. Without the tags refspec a tag ref fails the
+                        // checkout with "Couldn't find any revision to build".
+                        def isSha = ref ==~ /^[0-9a-fA-F]{7,40}$/
+                        def branchList = (isSha || ref.contains('/'))
+                            ? [[name: ref]]
+                            : [[name: "*/${ref}"], [name: "refs/tags/${ref}"]]
                         // Attach the credential only when provided, so public repos
                         // (and agents with ambient git auth) keep working unchanged.
-                        def remoteCfg = [url: params.TARGET_REPO_URL.trim()]
+                        def remoteCfg = [
+                            url:     params.TARGET_REPO_URL.trim(),
+                            refspec: '+refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*',
+                        ]
                         if (params.TARGET_CREDENTIALS_ID?.trim()) {
                             remoteCfg['credentialsId'] = params.TARGET_CREDENTIALS_ID.trim()
                         }
                         dir('_target') {
                             def tgtVars = checkout([$class: 'GitSCM',
-                                                    branches: [[name: branchSpec]],
+                                                    branches: branchList,
                                                     userRemoteConfigs: [remoteCfg]])
                             // When scanning an external project, the Bitbucket
                             // build-status must attach to the SCANNED commit (the one

@@ -101,8 +101,10 @@ def convert(raw):
         path = _rel_path(span["file_name"])
         begin = int(span.get("line_start", 1))
 
+        # Non-cryptographic dedup key for identical findings; not a security digest.
         fingerprint = hashlib.sha1(
-            f"{path}:{begin}:{check_name}:{text}".encode("utf-8")
+            f"{path}:{begin}:{check_name}:{text}".encode("utf-8"),
+            usedforsecurity=False,
         ).hexdigest()
         if fingerprint in seen:
             continue

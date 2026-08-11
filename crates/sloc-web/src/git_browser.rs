@@ -367,7 +367,7 @@ pub struct CompareRefsQuery {
       <div class="fetch-footer">
         <span class="fetch-footer-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
         <span class="fetch-footer-body">
-          <span>First fetch clones the repository — this may take 15–30 seconds for large repos. Subsequent fetches for the same URL are instant (cached). Browse URLs (e.g. <code style="font-family:ui-monospace,monospace;font-size:11px">/projects/PROJ/repos/REPO/browse</code>) are automatically converted to git clone URLs.</span>
+          <span>First fetch clones the repository — this may take 15-30 seconds for large repos. Subsequent fetches for the same URL are instant (cached). Browse URLs (e.g. <code style="font-family:ui-monospace,monospace;font-size:11px">/projects/PROJ/repos/REPO/browse</code>) are automatically converted to git clone URLs.</span>
           <span>Public repos work without credentials; for private repos, configure your SSH or HTTPS credentials in git before fetching. Corporate proxy/VPN certificates are trusted automatically from your OS certificate store — no extra setup. Behind an outbound proxy, set <code style="font-family:ui-monospace,monospace;font-size:11px">HTTPS_PROXY</code>/<code style="font-family:ui-monospace,monospace;font-size:11px">HTTP_PROXY</code>.</span>
         </span>
       </div>
