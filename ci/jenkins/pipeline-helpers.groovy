@@ -31,7 +31,7 @@
 // no bash discovery is needed). Discovery order:
 //   1. SLOC_BASH env override (explicit operator escape hatch), if it exists.
 //   2. SLOC_PORTABLE_GIT env — a *no-install* PortableGit folder root; we probe
-//      <root>\bin\bash.exe and <root>\usr\bin\bash.exe under it.
+//      <root>\\bin\\bash.exe and <root>\\usr\\bin\\bash.exe under it.
 //   3. `where bash` on PATH, skipping the WSL System32 shim (that bash.exe is a
 //      launcher for a Linux distro, not a usable POSIX shell for our scripts).
 //   4. Known Git-for-Windows locations, INCLUDING no-admin ones: a PortableGit
@@ -259,7 +259,7 @@ def initEnv() {
         // mingw64\bin + usr\bin to PATH (Windows ';'-separated) so gcc/ld resolve.
         //
         // Derive the root by LAYOUT, not by a '\Git\' name marker: bash.exe lives
-        // at <root>\bin\bash.exe or <root>\usr\bin\bash.exe under EVERY Git-for-
+        // at <root>\\bin\\bash.exe or <root>\\usr\\bin\\bash.exe under EVERY Git-for-
         // Windows layout — system, per-user (…\Programs\Git), and a PortableGit
         // folder (whose name is 'PortableGit', so a '\Git\' marker would miss it).
         // Guarded: only when a Windows bash path was actually resolved.
