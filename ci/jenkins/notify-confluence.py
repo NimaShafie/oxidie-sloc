@@ -74,7 +74,7 @@ def _req(method: str, url: str, auth: str, body: Optional[dict] = None):
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310 - configured http(s) Confluence API URL; errors caught below
             payload = resp.read().decode("utf-8")
             return resp.status, json.loads(payload) if payload else {}
     except urllib.error.HTTPError as e:
@@ -122,7 +122,7 @@ def _multipart_post(url: str, auth: str, filename: str, ctype: str, data: bytes)
     req.add_header("Content-Type", f"multipart/form-data; boundary={_BOUNDARY}")
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # nosec B310 - configured http(s) Confluence API URL; errors caught below
             return resp.status, None
     except urllib.error.HTTPError as e:
         return e.code, None

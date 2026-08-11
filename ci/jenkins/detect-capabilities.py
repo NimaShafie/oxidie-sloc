@@ -120,7 +120,7 @@ def probe_http(url: str, user: str, token: str, timeout: int = _PROBE_TIMEOUT):
         raw = f"{user}:{token}".encode("utf-8")
         req.add_header("Authorization", "Basic " + base64.b64encode(raw).decode("ascii"))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 - constructed http(s) probe URL; other/unreachable schemes handled by except below
             return resp.status
     except urllib.error.HTTPError as e:
         return e.code

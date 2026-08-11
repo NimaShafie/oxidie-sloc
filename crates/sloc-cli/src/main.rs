@@ -2729,7 +2729,7 @@ fn apply_local_gate(allow_local: bool, local_root: Option<&Path>) {
 
 async fn run_git_scan(args: GitScanArgs) -> Result<()> {
     apply_local_gate(args.allow_local, args.local_root.as_deref());
-    let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
+    let clones_dir = resolve_clones_dir(args.clones_dir.as_deref())?;
     let quiet = args.quiet;
 
     if !quiet {
@@ -2797,7 +2797,7 @@ fn write_git_scan_outputs(
 #[allow(clippy::needless_pass_by_value)]
 fn run_git_compare(args: GitCompareArgs) -> Result<()> {
     apply_local_gate(args.allow_local, args.local_root.as_deref());
-    let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
+    let clones_dir = resolve_clones_dir(args.clones_dir.as_deref())?;
     let quiet = args.quiet;
     let dest = git_clone_path(&args.repo, &clones_dir);
     clone_or_fetch(&args.repo, &dest)?;
@@ -2852,7 +2852,7 @@ fn write_compare_outputs(
 
 async fn run_watch(args: WatchArgs) -> Result<()> {
     apply_local_gate(args.allow_local, args.local_root.as_deref());
-    let clones_dir = resolve_clones_dir(args.clones_dir.as_deref());
+    let clones_dir = resolve_clones_dir(args.clones_dir.as_deref())?;
     let quiet = args.quiet;
     let interval = args.interval.max(60);
 
@@ -3168,11 +3168,95 @@ fn emit_prune_json(
 
 // ── git helpers ───────────────────────────────────────────────────────────────
 
-fn resolve_clones_dir(override_path: Option<&Path>) -> PathBuf {
-    override_path
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("SLOC_GIT_CLONES_DIR").ok().map(PathBuf::from))
-        .unwrap_or_else(|| std::env::temp_dir().join("sloc-git-clones"))
+fn resolve_clones_dir(override_path: Option<&Path>) -> Result<PathBuf> {
+    if let Some(p) = override_path {
+        return Ok(p.to_path_buf());
+    }
+    if let Some(v) = std::env::var("SLOC_GIT_CLONES_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        return Ok(PathBuf::from(v));
+    }
+    // Default to a PER-USER cache, not a single shared /tmp path. The old default
+    // (temp_dir()/sloc-git-clones) was one world-accessible directory shared by
+    // every user on the host: a second user collided on it (EACCES on reuse of the
+    // URL-keyed subdir), and — worse — any local user could pre-create that subdir
+    // and seed content another user would then clone-into and scan. Scope the cache
+    // to the current user and lock it to 0700.
+    let dir = default_clones_dir();
+    ensure_private_clones_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Per-user default clone-cache directory. Honors `XDG_CACHE_HOME` on Unix,
+/// otherwise a uid- (or username-) suffixed path under the system temp dir. On
+/// Windows the system temp dir is already per-user, so no suffix is needed.
+fn default_clones_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        if let Some(xdg) = std::env::var("XDG_CACHE_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            return PathBuf::from(xdg).join("oxide-sloc").join("git-clones");
+        }
+        let who = current_uid()
+            .map(|u| u.to_string())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.is_empty()))
+            .unwrap_or_else(|| "user".to_owned());
+        std::env::temp_dir().join(format!("sloc-git-clones-{who}"))
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("sloc-git-clones")
+    }
+}
+
+/// Current effective uid. std has no `getuid()`, so read it back off a file we
+/// just created (owned by our euid) — dependency-free and correct under rootless
+/// uid remaps. `None` if the probe could not be created.
+#[cfg(unix)]
+fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    let probe = std::env::temp_dir().join(format!("sloc-uid-probe-{}", std::process::id()));
+    std::fs::File::create(&probe).ok()?;
+    let uid = std::fs::metadata(&probe).ok().map(|m| m.uid());
+    let _ = std::fs::remove_file(&probe);
+    uid
+}
+
+/// Create the default clone cache privately (0700) or, if it already exists,
+/// verify the current user owns it — refusing to reuse a directory another user
+/// (potentially an attacker) pre-created and seeded.
+#[cfg(unix)]
+fn ensure_private_clones_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    if let Ok(meta) = std::fs::metadata(dir) {
+        if let Some(uid) = current_uid()
+            && meta.uid() != uid
+        {
+            anyhow::bail!(
+                "clone cache {} is owned by another user (uid {}, expected {}); refusing to \
+                 reuse it. Set SLOC_GIT_CLONES_DIR to a private path.",
+                dir.display(),
+                meta.uid(),
+                uid
+            );
+        }
+        return Ok(());
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_clones_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    Ok(())
 }
 
 fn git_clone_path(repo_url: &str, clones_dir: &Path) -> PathBuf {

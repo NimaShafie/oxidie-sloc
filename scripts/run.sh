@@ -164,7 +164,6 @@ launch() {
             printf '    Click "Allow access" to open port %s \xe2\x80\x94 no admin rights required.\n' "$SLOC_PORT"
         fi
         printf '\n'
-        [[ -z "${SLOC_API_KEY:-}" ]] && printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
         printf '  Press Ctrl+C to stop.\n\n'
         "$1" serve --server
     else
@@ -184,7 +183,8 @@ launch_cargo() {
 
     local tmpout
     tmpout="$(mktemp)"
-    local LOG_FILE="$LOG_DIR/run-$(date +%Y-%m-%d-%H-%M-%S).log"
+    local LOG_FILE
+    LOG_FILE="$LOG_DIR/run-$(date +%Y-%m-%d-%H-%M-%S).log"
 
     # Approximate total from lockfile for the progress bar denominator
     local total_pkgs=0
@@ -372,14 +372,34 @@ launch_cargo() {
             printf '    Click "Allow access" to open port %s \xe2\x80\x94 no admin rights required.\n' "$SLOC_PORT"
         fi
         printf '\n'
-        [[ -z "${SLOC_API_KEY:-}" ]] && \
-            printf '  WARNING: SLOC_API_KEY is not set \xe2\x80\x94 all endpoints are unauthenticated.\n           Set it before exposing to untrusted networks.\n\n'
         printf '  Press Ctrl+C to stop.\n\n'
         "$bin_path" serve --server
     else
         printf '\n  oxide-sloc starting \xe2\x86\x92 http://127.0.0.1:%s\n  Press Ctrl+C to stop.\n\n' "$SLOC_PORT"
         "$bin_path"
     fi
+}
+
+# Mirror the server's fail-closed auth gate BEFORE we build/launch anything in
+# --host mode. serve --server REFUSES to start without SLOC_API_KEY/SLOC_API_KEYS
+# (unless the operator opts into an open server), so printing a "starting…" banner
+# and only then dead-ending is misleading. Surface the real choice and stop early.
+check_server_auth() {
+    [[ "$HOST_MODE" == "1" ]] || return 0
+    if [[ -n "${SLOC_API_KEY:-}" ]] || [[ -n "${SLOC_API_KEYS:-}" ]]; then
+        return 0
+    fi
+    if [[ "${SLOC_ALLOW_UNAUTHENTICATED:-}" == "1" ]]; then
+        printf '\n  WARNING: SLOC_ALLOW_UNAUTHENTICATED=1 \xe2\x80\x94 running an OPEN server; all\n'
+        printf '           endpoints are unauthenticated. Only do this on a trusted, isolated network.\n'
+        return 0
+    fi
+    printf '\n  ERROR: LAN server mode (--host) requires authentication, and none is set.\n' >&2
+    printf '         serve --server will refuse to start. Choose one, then re-run:\n\n' >&2
+    printf '           export SLOC_API_KEY="$(head -c 32 /dev/urandom | base64)"   # recommended\n' >&2
+    printf '         or, ONLY on a trusted isolated network, opt into an open server:\n' >&2
+    printf '           export SLOC_ALLOW_UNAUTHENTICATED=1\n\n' >&2
+    exit 1
 }
 
 for arg in "$@"; do
@@ -390,6 +410,8 @@ for arg in "$@"; do
         *) ;;
     esac
 done
+
+check_server_auth
 
 # ── Auto-install or rebuild if requested ─────────────────────────────────────
 # On Windows this extracts the committed pre-built binary from dist/ (the .tar.gz

@@ -6,7 +6,8 @@ Every `git clone` includes everything needed to install and run oxide-sloc offli
 
 | What | File | Size | Status |
 |---|---|---|---|
-| **Windows pre-built binary** | `dist/oxide-sloc-windows-x64.zip` | ~9 MB | **Always committed** — updated by CI after every release |
+| **Windows pre-built binary** | `dist/oxide-sloc-windows-x64.zip` (+ `.tar.gz`) | ~9 MB | **Always committed** — updated by CI after every release |
+| **Linux x86_64 pre-built binary** | `dist/oxide-sloc-linux-x86_64.tar.gz` | ~10 MB | **Always committed** — built in a UBI 8 container and updated by CI after every release |
 | All Rust crate sources | `vendor.tar.gz.aa` / `.ab` / `.ac` | ~115 MB total (≤45 MB each) | **Always committed** |
 | Vendor checksums | `vendor.checksums.sha256` | — | **Always committed** (per-part SHA-256) |
 | Rust version pin | `rust-toolchain.toml` | — | **Always committed** |
@@ -18,6 +19,16 @@ automatically. No network calls are made by default.
 
 **Windows:** a plain `git clone` + `bash scripts/run.sh` extracts the pre-built binary from
 `dist/` and launches the web UI. No Rust toolchain required, no compilation.
+
+**Linux x86_64:** a plain `git clone` + `bash scripts/run.sh` extracts the committed
+`dist/oxide-sloc-linux-x86_64.tar.gz` — no Rust required, no compilation.
+
+**Linux arm64 (aarch64):** there is **no committed pre-built binary** for arm64, so
+`bash scripts/run.sh` builds from source offline using the committed arm64 toolchain
+(`toolchain/rust-toolchain-linux-arm64.tar.gz.*`) and the `vendor.tar.gz.*` parts. This works
+fully offline; it just compiles once (a few minutes) instead of extracting an instant binary.
+Pass `--build` to force compilation explicitly. (To ship an instant arm64 binary, build one on
+an arm64 host and commit it as `dist/oxide-sloc-linux-arm64.tar.gz`.)
 
 **Linux — Rust already installed:** a plain `git clone` + `bash scripts/run.sh` builds
 offline from the `vendor.tar.gz.*` parts with no extra steps.

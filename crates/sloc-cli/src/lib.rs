@@ -126,7 +126,7 @@
 //!
 //! ### PR diff comment (GitHub / GitLab)
 //!
-//! Posts an Adaptive Card–style comment to the pull request with code-line deltas.
+//! Posts an Adaptive Card-style comment to the pull request with code-line deltas.
 //!
 //! ```text
 //! oxide-sloc pr-comment current.json \

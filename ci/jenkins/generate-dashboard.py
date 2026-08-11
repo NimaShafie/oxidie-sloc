@@ -149,8 +149,8 @@ def fmt(n: int) -> str:
     """Compact number formatter.
 
     < 1,000          → as-is with Python locale comma (e.g. "2", "947")
-    1,000 – 9,999    → comma-separated (e.g. "1,247")
-    10,000 – 999,999 → integer K  (e.g. "15K", "100K")
+    1,000 - 9,999    → comma-separated (e.g. "1,247")
+    10,000 - 999,999 → integer K  (e.g. "15K", "100K")
     >= 1,000,000     → one-decimal M, trailing .0 stripped (e.g. "3.8M")
     """
     v = int(n)

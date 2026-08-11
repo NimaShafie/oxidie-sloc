@@ -14364,7 +14364,7 @@ async fn test_metrics_handler(
           <button class="cov-tab active" data-tier="all">All</button>
           <button class="cov-tab" data-tier="zero">Uncovered (0%)</button>
           <button class="cov-tab" data-tier="low">Low (&lt;50%)</button>
-          <button class="cov-tab" data-tier="mid">Moderate (50–79%)</button>
+          <button class="cov-tab" data-tier="mid">Moderate (50-79%)</button>
           <button class="cov-tab" data-tier="high">High (≥80%)</button>
         </div>
         <input type="search" id="cov-file-search" class="cov-file-search" placeholder="Filter by filename…">
@@ -15590,7 +15590,7 @@ async fn test_metrics_handler(
         ];
         if(covDs.cov_tiers){{
           covSumRows.push(['Files High (≥80%)', String(covDs.cov_tiers.high||0)]);
-          covSumRows.push(['Files Moderate (50–79%)', String(covDs.cov_tiers.mid||0)]);
+          covSumRows.push(['Files Moderate (50-79%)', String(covDs.cov_tiers.mid||0)]);
           covSumRows.push(['Files Low (<50%)', String(covDs.cov_tiers.low||0)]);
         }}
         sheets.push({{name:'Coverage Summary',tbl:'CoverageSummary',hdr:covSumHdr,rows:covSumRows,tot:null,cols:[26,14]}});
@@ -18875,7 +18875,7 @@ struct SubmoduleRow {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
             Quick Scan
           </button>
-          <div class="quick-scan-hint">Scan immediately with default settings — skips steps 2–4.</div>
+          <div class="quick-scan-hint">Scan immediately with default settings — skips steps 2-4.</div>
         </div>
 
         <div class="sidebar-kbd-hint"><span class="sidebar-kbd-key">←</span><span>Back</span><span style="margin:0 6px;">·</span><span class="sidebar-kbd-key">→</span><span>Next</span></div>
@@ -19370,7 +19370,7 @@ int main() { … }   ← code
                     <input type="number" name="complexity_alert" id="complexity_alert" min="0" max="9999" placeholder="e.g. 100 — leave blank for no alert" style="width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px;" />
                   </div>
                   <div class="explainer-card prominent" style="margin:0;">
-                    <div class="advanced-rule-description"><strong>Purpose:</strong> When set, files whose total cyclomatic complexity score exceeds this threshold are highlighted in the results page with an accent border.<br /><strong>Complexity score</strong> counts branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a fast lexical approximation of McCabe complexity.<br /><strong>Common thresholds:</strong> 50 for a simple project, 100–200 for medium, 300+ for large repos.</div>
+                    <div class="advanced-rule-description"><strong>Purpose:</strong> When set, files whose total cyclomatic complexity score exceeds this threshold are highlighted in the results page with an accent border.<br /><strong>Complexity score</strong> counts branch decision keywords (if, for, while, ||, &amp;&amp;, …) across all code lines — a fast lexical approximation of McCabe complexity.<br /><strong>Common thresholds:</strong> 50 for a simple project, 100-200 for medium, 300+ for large repos.</div>
                     <div class="code-sample" style="margin-top:10px;font-size:12px;"># 0 or blank = no alert (default)
 # 50  = flag any file with &gt; 50 branch points
 # 100 = flag any file with &gt; 100 branch points
@@ -20086,7 +20086,7 @@ int main() { … }   ← code
       function updateScrollProgress() {
         // Step 1 starts at 0%, step 2 at 25%, step 3 at 50%, step 4 at 75%.
         // Within each step, scroll position nudges the bar forward (max just below the next milestone).
-        var stepBase = [0, 0, 25, 50, 75]; // base % for steps 1–4 (index = step number)
+        var stepBase = [0, 0, 25, 50, 75]; // base % for steps 1-4 (index = step number)
         var stepEnd  = [0, 24, 49, 74, 100]; // max % before clicking Next (step 4 can reach 100)
         var step = Math.min(Math.max(currentStep, 1), 4);
         var base = stepBase[step];
@@ -32057,12 +32057,12 @@ Content-Disposition: attachment; filename="sloc-run-&lt;run_id&gt;.zip"
           <p class="params-heading">Query Parameters</p>
           <table class="params">
             <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
-            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
+            <tr><td class="pt-name">repo</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
           </table>
           <p class="curl-heading">Example</p>
           <div class="curl-wrap">
             <pre class="curl-block" data-curl-id="c-git-refs">curl -H "Authorization: Bearer $SLOC_API_KEY" \
-  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/refs?path=/path/to/repo"</pre>
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/refs?repo=/path/to/repo"</pre>
             <button class="curl-copy-btn" data-target="c-git-refs">Copy</button>
           </div>
         </div>
@@ -32081,13 +32081,13 @@ Content-Disposition: attachment; filename="sloc-run-&lt;run_id&gt;.zip"
           <p class="params-heading">Query Parameters</p>
           <table class="params">
             <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
-            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
-            <tr><td class="pt-name">ref</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Branch name, tag, or commit SHA</td></tr>
+            <tr><td class="pt-name">repo</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
+            <tr><td class="pt-name">ref_name</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Branch name, tag, or commit SHA</td></tr>
           </table>
           <p class="curl-heading">Example</p>
           <div class="curl-wrap">
             <pre class="curl-block" data-curl-id="c-git-scan">curl -H "Authorization: Bearer $SLOC_API_KEY" \
-  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/scan-ref?path=/path/to/repo&amp;ref=main"</pre>
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/scan-ref?repo=/path/to/repo&amp;ref_name=main"</pre>
             <button class="curl-copy-btn" data-target="c-git-scan">Copy</button>
           </div>
         </div>
@@ -32106,14 +32106,14 @@ Content-Disposition: attachment; filename="sloc-run-&lt;run_id&gt;.zip"
           <p class="params-heading">Query Parameters</p>
           <table class="params">
             <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
-            <tr><td class="pt-name">path</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
-            <tr><td class="pt-name">base</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Base ref (branch, tag, or SHA)</td></tr>
-            <tr><td class="pt-name">head</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Head ref to compare against the base</td></tr>
+            <tr><td class="pt-name">repo</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Absolute path to a local git repository</td></tr>
+            <tr><td class="pt-name">baseline_ref</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Base ref (branch, tag, or SHA)</td></tr>
+            <tr><td class="pt-name">current_ref</td><td class="pt-type">string</td><td><span class="pt-req">required</span></td><td>Head ref to compare against the base</td></tr>
           </table>
           <p class="curl-heading">Example</p>
           <div class="curl-wrap">
             <pre class="curl-block" data-curl-id="c-git-compare">curl -H "Authorization: Bearer $SLOC_API_KEY" \
-  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/compare-refs?path=/path/to/repo&amp;base=v1.0&amp;head=main"</pre>
+  "<span class="base-url-slot">http://127.0.0.1:4317</span>/api/git/compare-refs?repo=/path/to/repo&amp;baseline_ref=v1.0&amp;current_ref=main"</pre>
             <button class="curl-copy-btn" data-target="c-git-compare">Copy</button>
           </div>
         </div>

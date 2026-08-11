@@ -305,13 +305,13 @@ pub struct LanguageStyleGroup {
     pub files_count: u32,
     /// Name of the guide with the highest average adherence.
     pub dominant_guide: String,
-    /// Average adherence of the dominant guide (0–100).
+    /// Average adherence of the dominant guide (0-100).
     pub dominant_score_pct: u8,
     /// Most common indent style across the group.
     pub common_indent_style: String,
-    /// Average guide adherence scores (guide name, 0–100) sorted descending.
+    /// Average guide adherence scores (guide name, 0-100) sorted descending.
     pub guide_avg_scores: Vec<(String, u8)>,
-    /// Percentage of files (0–100) where ≤ 5 % of lines exceed the configured column threshold.
+    /// Percentage of files (0-100) where ≤ 5 % of lines exceed the configured column threshold.
     pub line80_compliant_pct: u8,
     /// Same as `line80_compliant_pct` but named for the actual configured threshold.
     pub line_col_compliant_pct: u8,
@@ -324,9 +324,9 @@ pub struct StyleSummary {
     pub files_analyzed: u32,
     /// Most common indent style across *all* analysed files.
     pub common_indent_style: String,
-    /// Percentage of all analysed files (0–100) with ≤ 5 % of lines over 80 chars (legacy, always 80).
+    /// Percentage of all analysed files (0-100) with ≤ 5 % of lines over 80 chars (legacy, always 80).
     pub line80_compliant_pct: u8,
-    /// Percentage of all analysed files (0–100) with ≤ 5 % of lines over `col_threshold` chars.
+    /// Percentage of all analysed files (0-100) with ≤ 5 % of lines over `col_threshold` chars.
     pub line_col_compliant_pct: u8,
     /// Column-width threshold used for `line_col_compliant_pct` (from `analysis.style_col_threshold`).
     pub col_threshold: u16,
@@ -2609,7 +2609,8 @@ mod tests {
         let bytes = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x96, 0x57];
         let (text, encoding, warnings) = decode_bytes(&bytes).unwrap();
         assert_eq!(encoding, "windows-1252");
-        assert!(text.contains('–'));
+        // 0x96 in windows-1252 decodes to U+2013; assert via escape to keep the source ASCII.
+        assert!(text.contains('\u{2013}'));
         assert!(!warnings.is_empty());
     }
 

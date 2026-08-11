@@ -106,8 +106,7 @@ find "${DOWNLOAD_DIR}" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/
 TOTAL=$(find "${DOWNLOAD_DIR}" \( -name '*.hpi' -o -name '*.jpi' \) | wc -l | tr -d ' ')
 echo ""
 echo "==> Downloaded ${TOTAL} plugin files (direct + transitive dependencies):"
-find "${DOWNLOAD_DIR}" \( -name '*.hpi' -o -name '*.jpi' \) \
-    | xargs -n1 basename \
+find "${DOWNLOAD_DIR}" \( -name '*.hpi' -o -name '*.jpi' \) -exec basename {} \; \
     | sort \
     | sed 's/^/    /'
 echo ""

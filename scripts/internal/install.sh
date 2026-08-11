@@ -25,7 +25,9 @@
 #   --online: downloads explicitly from SLOC_RELEASE_BASE_URL (falls back to GitHub Releases
 #             if that variable is not set).  The user has opted in to a network fetch.
 #   --build:  extracts the bundled Rust toolchain and compiles from vendor sources.
-#             Use when no pre-built binary is available and compilation is acceptable.
+#             Compiles even when a dist/ archive is present (it skips dist extraction
+#             and network download). Use --rebuild to also discard an already-installed
+#             binary and force a fresh compile.
 #   If cargo (Rust) is already on PATH  → extract vendor sources + cargo build (no toolchain needed).
 #   If no cargo on PATH                  → requires --build to proceed.
 set -euo pipefail
@@ -34,9 +36,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 FORCE_REBUILD=false
+# --auto is accepted for forward-compat; rustup auto-bootstrap is not yet wired.
 AUTO_RUSTUP=false
 ONLINE_MODE=false
 BUILD_MODE=false
+# AUTO_RUSTUP is assigned by --auto below but currently inert (see note above).
+# shellcheck disable=SC2034
 for arg in "$@"; do
     case "$arg" in
         --rebuild|--force|-f) FORCE_REBUILD=true; BUILD_MODE=true ;;
@@ -150,7 +155,8 @@ Write-Output 'IMPORTED'
 build_with_progress() {
     local tmpout
     tmpout="$(mktemp)"
-    local LOG_FILE="$LOG_DIR/install-$(date +%Y-%m-%d-%H-%M-%S).log"
+    local LOG_FILE
+    LOG_FILE="$LOG_DIR/install-$(date +%Y-%m-%d-%H-%M-%S).log"
 
     local total_pkgs=0
     if [[ -f "$REPO_ROOT/Cargo.lock" ]]; then
@@ -421,7 +427,9 @@ fi
 
 # ── 2. Pre-built binary from dist/ ───────────────────────────────────────────
 # update-dist.yml commits platform archives here after every release.
-if [[ "$FORCE_REBUILD" == false ]]; then
+# Skipped under --build/--rebuild: those flags opt into compiling from source, so
+# extracting the pre-built dist archive here would silently ignore the request.
+if [[ "$FORCE_REBUILD" == false ]] && [[ "$BUILD_MODE" == false ]]; then
     if [[ "$PLATFORM" == windows ]]; then
         # A pre-built binary ships in dist/ as BOTH a .zip and a .tar.gz so it can be
         # unpacked with whatever offline tool a locked-down host has. Try them in order
@@ -438,7 +446,7 @@ if [[ "$FORCE_REBUILD" == false ]]; then
 
             # 1. GNU tar on the committed .tar.gz — always present in Git Bash.
             if [[ "$_DIST_OK" != true ]] && [[ -f "$DIST_TGZ" ]] && command -v tar &>/dev/null; then
-                tar -xzf "$DIST_TGZ" -C "$_DIST_TMP" 2>/dev/null || true
+                tar --no-same-owner -xzf "$DIST_TGZ" -C "$_DIST_TMP" 2>/dev/null || true
                 [[ -f "$_DIST_TMP/oxide-sloc.exe" ]] && _DIST_OK=true
             fi
             # 2. unzip on the .zip.
@@ -503,16 +511,40 @@ if [[ "$FORCE_REBUILD" == false ]]; then
         _DIST_LINUX="$REPO_ROOT/dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"
         if [[ -f "$_DIST_LINUX" ]]; then
             echo " Pre-built binary found in dist/ — extracting..."
-            _DIST_OK=false
-            tar -xzf "$_DIST_LINUX" -C "$REPO_ROOT" 2>/dev/null && _DIST_OK=true
-            if [[ "$_DIST_OK" == true ]] && [[ -f "$EXE" ]]; then
+            # --no-same-owner: as root or under a uid-remapped userns (rootless
+            # containers, CI agents), GNU tar defaults to --same-owner and its
+            # chown to the archive's original uid/gid fails with EINVAL, making
+            # tar exit non-zero even though the binary extracted fine. Drop the
+            # chown and trust the on-disk result, not tar's exit code.
+            tar --no-same-owner -xzf "$_DIST_LINUX" -C "$REPO_ROOT" 2>/dev/null || true
+            if [[ -f "$EXE" ]]; then
                 chmod +x "$EXE"
                 echo " [OK] oxide-sloc installed from dist/"
                 echo ""
                 echo " Start the web UI:  bash scripts/run.sh"
                 exit 0
             fi
-            echo " [WARN] dist/ extraction failed — falling back to source build." >&2
+
+            # Archive present but extraction produced no binary. Don't steer an
+            # air-gapped user toward a network download or a source build (slow,
+            # trips AV/EDR) unless a compiler is genuinely on PATH — explain the
+            # real problem and give a copy-paste offline extract.
+            if command -v cargo &>/dev/null; then
+                echo " [WARN] dist/ extraction failed — cargo detected, falling back to source build." >&2
+            else
+                echo "" >&2
+                echo " [ERROR] A pre-built oxide-sloc is present in dist/ but it could not be" >&2
+                echo "         extracted. This is an extraction-tooling gap, NOT a missing" >&2
+                echo "         binary — no download and no compiler are required." >&2
+                echo "" >&2
+                echo "         Unpack it by hand from the repo root, then re-run bash scripts/run.sh :" >&2
+                echo "           tar --no-same-owner -xzf dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz -C ." >&2
+                echo "" >&2
+                echo "         If the unpacked oxide-sloc disappears immediately, antivirus/EDR" >&2
+                echo "         quarantined it — allow-list the repo folder or the binary and retry." >&2
+                echo "" >&2
+                exit 1
+            fi
         fi
     fi
 fi
@@ -606,7 +638,8 @@ _do_download() {
 
 if [[ "$ONLINE_MODE" == true ]]; then
     _do_download true && exit 0
-elif [[ "$FORCE_REBUILD" == false ]] && ! command -v cargo &>/dev/null \
+elif [[ "$FORCE_REBUILD" == false ]] && [[ "$BUILD_MODE" == false ]] \
+    && ! command -v cargo &>/dev/null \
     && command -v curl &>/dev/null \
     && [[ -n "${SLOC_RELEASE_BASE_URL:-}" ]]; then
     # SLOC_RELEASE_BASE_URL is set — an administrator has configured a trusted artifact
@@ -763,6 +796,16 @@ try {
         export RUSTUP_HOME="$RUSTUP_HOME_LOCAL"
         export CARGO_HOME="$CARGO_HOME_LOCAL"
         export PATH="$CARGO_HOME_LOCAL/bin:${TC_BIN:-$RUSTUP_HOME_LOCAL/bin}:$PATH"
+
+        # Pin rustup to the EXACT bundled toolchain. rust-toolchain.toml requests
+        # channel "1.97" (an x.y shorthand), which the rustup proxy tries to resolve
+        # against the ONLINE channel manifest — fatal on a sealed network. The bundle
+        # installs "1.97.0-<target>"; naming it explicitly makes rustup use the local
+        # toolchain and never reach the network. TC_BIN is …/toolchains/<name>/bin.
+        if [[ -n "${TC_BIN:-}" ]]; then
+            _TC_NAME="$(basename "$(dirname "$TC_BIN")")"
+            [[ -n "$_TC_NAME" ]] && export RUSTUP_TOOLCHAIN="$_TC_NAME"
+        fi
 
         if ! command -v cargo &>/dev/null; then
             echo " [ERROR] cargo not found after toolchain extraction." >&2

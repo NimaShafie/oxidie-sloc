@@ -107,7 +107,7 @@ After the rebuild:
   `cargo-test` so a bare agent stays green; with nextest baked into the image as
   above, selecting `cargo-nextest` yields the Test Result view with no fallback.
 - **Coverage** appears when a build runs with `COVERAGE_STANDALONE=true` (left
-  opt-in: it recompiles instrumented, ~4–5 min/build, and runs oxide-sloc's *own*
+  opt-in: it recompiles instrumented, ~4-5 min/build, and runs oxide-sloc's *own*
   llvm-cov — meaningful for self-CI, not external-repo scans). The view is served
   at **`/job/<job>/<n>/coverage/`**. SonarQube imports coverage from **LCOV**, not
   the Cobertura XML, so the Cobertura duplicate-element quirk doesn't affect it.

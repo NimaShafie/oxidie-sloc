@@ -6929,7 +6929,7 @@ struct WarningOpportunityRow {
             } else if (ps === Infinity) {
               pageInfo.textContent = 'All ' + total.toLocaleString() + ' files';
             } else {
-              pageInfo.textContent = (start + 1) + '–' + end + ' of ' + total.toLocaleString() + ' files';
+              pageInfo.textContent = (start + 1) + '-' + end + ' of ' + total.toLocaleString() + ' files';
             }
           }
           if (countLabel) {

@@ -215,8 +215,8 @@ def initEnv() {
         // MinGW gcc/ld for the x86_64-pc-windows-gnu target. shx() runs NON-login
         // bash (/etc/profile is not sourced), so /mingw64/bin is not injected and
         // the cargo build would fail linking with "linker 'cc' not found". Derive
-        // the Git install root from the resolved bash.exe (…\Git\bin\bash.exe or
-        // …\Git\usr\bin\bash.exe → strip back to the Git\ root) and PREPEND its
+        // the Git install root from the resolved bash.exe (…/Git/bin/bash.exe or
+        // …/Git/usr/bin/bash.exe → strip back to the Git/ root) and PREPEND its
         // mingw64\bin + usr\bin to PATH (Windows ';'-separated) so gcc/ld resolve.
         // Guarded: only when a Windows bash path was actually resolved.
         def gccPrefix = ''

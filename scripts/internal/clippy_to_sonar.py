@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Convert `cargo clippy --message-format=json` output to SonarQube generic external-issues JSON."""
-import json, os, sys
+import json
+import os
+import sys
 
 LEVEL_TO_IMPACT = {
     "error":   ("RELIABILITY",    "HIGH"),

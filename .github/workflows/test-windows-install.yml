@@ -3,7 +3,7 @@ name: Test Windows install
 # Manual-dispatch only — on-demand verification harness, not a CI gate.
 # Run via: gh workflow run test-windows-install.yml --ref main
 # Or: Actions tab → "Test Windows install" → Run workflow
-# Expected runtime: ~10–15 minutes. Expected outcome: all steps green.
+# Expected runtime: ~10-15 minutes. Expected outcome: all steps green.
 on:
   workflow_dispatch:
 

@@ -10,6 +10,49 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.13] — 2026-08-10
+
+### Fixed
+
+- **Jenkins pipeline compilation**: reworded a comment in `pipeline-helpers.groovy` whose `\usr`
+  path fragment was parsed as an invalid Unicode escape at lex time, which broke CPS compilation
+  and failed every build at "Load helpers".
+- **Jenkins target checkout of tags**: `TARGET_REF` set to a tag (e.g. `v1.1`) now resolves — the
+  target checkout fetches both heads and tags and offers both resolutions instead of branches only.
+- **Offline `--rebuild`**: the bundled-toolchain build pins `RUSTUP_TOOLCHAIN` to the exact
+  installed toolchain, so a sealed-network rebuild no longer tries to fetch the `1.97` channel
+  manifest online.
+- **Linux dist extraction (root / rootless container / uid-remapped CI)**: `install.sh` extracts
+  with `--no-same-owner` and trusts the on-disk binary over tar's exit code, and prints an
+  actionable "extraction-tooling gap" message instead of the misleading "no pre-built binary found".
+- **`install.sh --build`**: compiles from source even when a `dist/` archive is present (it
+  previously extracted dist and ignored the flag).
+- **Stale `dist/` binaries lacked per-host git credentials**: the committed pre-built binaries are
+  rebuilt so the multi-instance credential registry (`SLOC_GIT_CRED_*`) is present in dist-installed
+  binaries, not only in from-source builds.
+- **Per-host credential ports**: `SLOC_GIT_CRED_<HOST>_<PORT>` is now honored (tried before the
+  bare-host key), matching the documented `git.corp:7990 → GIT_CORP_7990` convention.
+- **Per-user clone cache**: the CLI git clone cache defaults to a per-user, `0700` directory
+  (honoring `XDG_CACHE_HOME`) and refuses to reuse a cache owned by another user — fixing
+  cross-user collisions and a local cache-poisoning vector. `SLOC_GIT_CLONES_DIR` still overrides.
+- **`run.sh --host` messaging**: LAN server mode fails fast with the real choice (set `SLOC_API_KEY`
+  or opt into `SLOC_ALLOW_UNAUTHENTICATED=1`) instead of printing "unauthenticated" and then
+  refusing to start.
+- **In-app API docs**: corrected the `/api/git/refs`, `/api/git/scan-ref`, and
+  `/api/git/compare-refs` query-parameter names (`repo`, `ref_name`, `baseline_ref`, `current_ref`).
+
+### Added
+
+- **`SLOC_GIT_SSH_ACCEPT_NEW`**: opt-in trust-on-first-use for SSH clones (adds
+  `StrictHostKeyChecking=accept-new`); the default remains strict host-key checking.
+
+### Documentation
+
+- Documented SSH host-key seeding for fresh agents, port-qualified credential keys, and the Linux
+  arm64 build-from-source path (no pre-built arm64 binary is committed).
+
+---
+
 ## [1.6.12] — 2026-08-07
 
 ### Fixed
@@ -742,8 +785,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   relocated from `scripts/` to `scripts/internal/` for consistency with the rest of
   the internal tooling. References in `docs/server-deployment.md` and
   `scripts/serve-server.sh` updated accordingly.
-- **Non-ASCII characters in JS strings** (`sloc-web`): Replaced literal `…` and `–`
-  characters with `…` / `–` escape sequences in inline JavaScript to prevent
+- **Non-ASCII characters in JS strings** (`sloc-web`): Replaced literal `…` and `-`
+  characters with `…` / `-` escape sequences in inline JavaScript to prevent
   Chrome `SyntaxError` when the page is served with a non-UTF-8 content-type header.
 - **Timestamp display on result page** (`sloc-web`): Scan time and generated-at
   chips now use a consistent seconds-precision format with explicit timezone label;

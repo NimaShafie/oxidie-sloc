@@ -8,7 +8,10 @@ set -euo pipefail
 # Set OXIDE_SLOC_ENV_FILE in your shell profile or invoke as:
 #     OXIDE_SLOC_ENV_FILE=~/.config/oxide-sloc/jenkins.env bash ci/jenkins/render-job-config.sh
 if [ -n "${OXIDE_SLOC_ENV_FILE:-}" ] && [ -f "${OXIDE_SLOC_ENV_FILE}" ]; then
-    set -a; . "${OXIDE_SLOC_ENV_FILE}"; set +a
+    set -a
+    # shellcheck source=/dev/null
+    . "${OXIDE_SLOC_ENV_FILE}"   # operator-supplied path, resolved at runtime
+    set +a
 fi
 
 # REPO_URL is REQUIRED — never silently default to an internet URL, so this is safe
