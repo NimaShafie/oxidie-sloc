@@ -413,31 +413,81 @@ fi
 # update-dist.yml commits platform archives here after every release.
 if [[ "$FORCE_REBUILD" == false ]]; then
     if [[ "$PLATFORM" == windows ]]; then
-        DIST_WIN="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
-        if [[ -f "$DIST_WIN" ]]; then
-            echo " Pre-built binary found in dist/ — extracting..."
+        # A pre-built binary ships in dist/ as BOTH a .zip and a .tar.gz so it can be
+        # unpacked with whatever offline tool a locked-down host has. Try them in order
+        # of reliability. Crucially, GNU tar (bundled with Git for Windows) and the
+        # built-in Windows tar.exe (bsdtar in System32) both work when `unzip` is absent
+        # and PowerShell is restricted (Constrained Language Mode / AllSigned) — the
+        # exact combination that made older installs dead-end at "download or build".
+        DIST_ZIP="$REPO_ROOT/dist/oxide-sloc-windows-x64.zip"
+        DIST_TGZ="$REPO_ROOT/dist/oxide-sloc-windows-x64.tar.gz"
+        if [[ -f "$DIST_ZIP" ]] || [[ -f "$DIST_TGZ" ]]; then
+            echo " Pre-built binary found in dist/ — extracting (offline, no build needed)..."
             _DIST_TMP="$(mktemp -d)"
             _DIST_OK=false
-            if command -v unzip &>/dev/null; then
-                unzip -q "$DIST_WIN" -d "$_DIST_TMP" && _DIST_OK=true
-            else
-                _DIST_WIN_W="$(cygpath -w "$DIST_WIN" 2>/dev/null || echo "$DIST_WIN")"
-                _DIST_TMP_W="$(cygpath -w "$_DIST_TMP" 2>/dev/null || echo "$_DIST_TMP")"
-                powershell.exe -NoProfile -NonInteractive -Command \
-                    "Expand-Archive -Path '$_DIST_WIN_W' -DestinationPath '$_DIST_TMP_W' -Force" \
-                    && _DIST_OK=true
+
+            # 1. GNU tar on the committed .tar.gz — always present in Git Bash.
+            if [[ "$_DIST_OK" != true ]] && [[ -f "$DIST_TGZ" ]] && command -v tar &>/dev/null; then
+                tar -xzf "$DIST_TGZ" -C "$_DIST_TMP" 2>/dev/null || true
+                [[ -f "$_DIST_TMP/oxide-sloc.exe" ]] && _DIST_OK=true
             fi
+            # 2. unzip on the .zip.
+            if [[ "$_DIST_OK" != true ]] && [[ -f "$DIST_ZIP" ]] && command -v unzip &>/dev/null; then
+                unzip -q "$DIST_ZIP" -d "$_DIST_TMP" 2>/dev/null || true
+                [[ -f "$_DIST_TMP/oxide-sloc.exe" ]] && _DIST_OK=true
+            fi
+            # 3. Windows built-in bsdtar (tar.exe) — extracts .zip too; no PowerShell needed.
+            if [[ "$_DIST_OK" != true ]] && [[ -f "$DIST_ZIP" ]] && [[ -x /c/Windows/System32/tar.exe ]]; then
+                _ZIP_W="$(cygpath -w "$DIST_ZIP" 2>/dev/null || echo "$DIST_ZIP")"
+                _TMP_W="$(cygpath -w "$_DIST_TMP" 2>/dev/null || echo "$_DIST_TMP")"
+                /c/Windows/System32/tar.exe -xf "$_ZIP_W" -C "$_TMP_W" 2>/dev/null || true
+                [[ -f "$_DIST_TMP/oxide-sloc.exe" ]] && _DIST_OK=true
+            fi
+            # 4. PowerShell Expand-Archive — last, since a hardened host may block it.
+            if [[ "$_DIST_OK" != true ]] && [[ -f "$DIST_ZIP" ]] && command -v powershell.exe &>/dev/null; then
+                _ZIP_W="$(cygpath -w "$DIST_ZIP" 2>/dev/null || echo "$DIST_ZIP")"
+                _TMP_W="$(cygpath -w "$_DIST_TMP" 2>/dev/null || echo "$_DIST_TMP")"
+                powershell.exe -NoProfile -NonInteractive -Command \
+                    "Expand-Archive -Path '$_ZIP_W' -DestinationPath '$_TMP_W' -Force" 2>/dev/null || true
+                [[ -f "$_DIST_TMP/oxide-sloc.exe" ]] && _DIST_OK=true
+            fi
+
             if [[ "$_DIST_OK" == true ]] && [[ -f "$_DIST_TMP/oxide-sloc.exe" ]]; then
                 cp "$_DIST_TMP/oxide-sloc.exe" "$EXE"
                 rm -rf "$_DIST_TMP"
-                echo " [OK] oxide-sloc.exe installed from dist/"
+                echo " [OK] oxide-sloc.exe installed from dist/ (no build, no network)."
                 trust_ca_cert
                 echo ""
                 echo " Start the web UI:  bash scripts/run.sh"
                 exit 0
             fi
             rm -rf "$_DIST_TMP"
-            echo " [WARN] dist/ extraction failed — falling back to source build." >&2
+
+            # Every extractor failed even though a pre-built archive is present. Do NOT
+            # steer an air-gapped user toward a network download or a source build (the
+            # build path is slow and trips AV/EDR false positives). Explain the real
+            # problem and give a copy-paste offline extract, unless a compiler is on PATH
+            # and a build is genuinely viable here.
+            if command -v cargo &>/dev/null; then
+                echo " [WARN] dist/ extraction failed — cargo detected, falling back to source build." >&2
+            else
+                echo "" >&2
+                echo " [ERROR] A pre-built oxide-sloc.exe is present in dist/ but no available tool" >&2
+                echo "         could extract it. This is an extraction-tooling gap, NOT a missing" >&2
+                echo "         binary — no download and no compiler are required." >&2
+                echo "" >&2
+                echo "         Unpack it by hand (any ONE of these) from the repo root, then re-run" >&2
+                echo "         bash scripts/run.sh :" >&2
+                [[ -f "$DIST_TGZ" ]] && \
+                echo "           tar -xzf dist/oxide-sloc-windows-x64.tar.gz -C ." >&2
+                [[ -f "$DIST_ZIP" ]] && \
+                echo "           tar -xf  dist/oxide-sloc-windows-x64.zip    -C .   # Windows/Git-Bash tar" >&2
+                echo "" >&2
+                echo "         If the unpacked oxide-sloc.exe disappears immediately, antivirus/EDR" >&2
+                echo "         quarantined it — allow-list the repo folder or the .exe and retry." >&2
+                echo "" >&2
+                exit 1
+            fi
         fi
     else
         _DIST_LINUX="$REPO_ROOT/dist/oxide-sloc-linux-${LINUX_ARCH}.tar.gz"

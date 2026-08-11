@@ -392,8 +392,9 @@ for arg in "$@"; do
 done
 
 # ── Auto-install or rebuild if requested ─────────────────────────────────────
-# On Windows this extracts dist/oxide-sloc-windows-x64.zip (no build needed).
-# On Linux this builds from source via vendor + toolchain if needed.
+# On Windows this extracts the committed pre-built binary from dist/ (the .tar.gz
+# or .zip, whichever an offline host can unpack) — no build, no network.
+# On Linux this extracts dist/ if present, else builds from vendor + toolchain.
 if [[ ! -f "$EXE" ]] || [[ "$REBUILD_MODE" == true ]]; then
     if [[ "$REBUILD_MODE" == true ]]; then
         echo " [--rebuild] Forcing fresh install..."
