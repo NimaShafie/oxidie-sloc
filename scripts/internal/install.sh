@@ -90,8 +90,18 @@ print_log_link() {
 # certificates; writing the backing registry key directly bypasses it — no dialog, no Admin.
 trust_ca_cert() {
     [[ "$PLATFORM" != windows ]] && return 0
-    local cert="$REPO_ROOT/certs/sloc-ca.crt"
-    [[ -f "$cert" ]] || return 0
+    # The public root CA that signed the dist exe is committed at deploy/certs/.
+    # (gen-signing-cert.sh writes it there; only the public .crt is committed —
+    # private key material stays in the gitignored _signing/.) Importing it into
+    # the current user's Root store makes the signed binary a TRUSTED publisher on
+    # a fresh corporate clone — otherwise it shows as "unknown publisher" and
+    # SmartScreen/AppLocker/EDR publisher allow-rules can't match it. Fall back to
+    # a repo-root certs/ layout for older checkouts.
+    local cert=""
+    for _c in "$REPO_ROOT/deploy/certs/sloc-ca.crt" "$REPO_ROOT/certs/sloc-ca.crt"; do
+        [[ -f "$_c" ]] && { cert="$_c"; break; }
+    done
+    [[ -n "$cert" ]] || return 0
     local cert_win
     cert_win="$(cygpath -w "$cert" 2>/dev/null || echo "$cert")"
 
@@ -130,7 +140,7 @@ Write-Output 'IMPORTED'
             ;;
         *)
             echo " [WARN] Certificate import via registry failed. To trust manually (no Admin needed):"
-            echo "        certutil -user -addstore Root certs/sloc-ca.crt"
+            echo "        certutil -user -addstore Root deploy/certs/sloc-ca.crt"
             ;;
     esac
 }
