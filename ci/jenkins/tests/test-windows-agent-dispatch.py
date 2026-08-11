@@ -83,9 +83,20 @@ def test_helpers():
           "env.SLOC_BASH" in src)
     check("helpers: resolveBash skips the WSL System32 shim",
           "system32" in src.lower() and "where bash" in src.lower())
+    # resolveBash builds candidate paths from Git/PortableGit folder ROOTS via a
+    # bashesUnder() helper (<root>\bin\bash.exe + <root>\usr\bin\bash.exe), so the
+    # probe list is no longer one literal string. Verify: the system Git root is
+    # probed, the <root>\bin\bash.exe layout is derived, and the no-admin
+    # fallbacks (per-user LocalAppData + a staged PortableGit folder) are covered.
     check("helpers: resolveBash probes known Git-for-Windows paths",
-          r"Program Files\\Git\\bin\\bash.exe" in src
-          or r"Program Files\\Git\\usr\\bin\\bash.exe" in src)
+          r"Program Files\\Git" in src
+          and (r"\\bin\\bash.exe" in src or r"\\usr\\bin\\bash.exe" in src))
+    check("helpers: resolveBash offers a no-install PortableGit path",
+          "SLOC_PORTABLE_GIT" in src and "PortableGit" in src,
+          "must honour SLOC_PORTABLE_GIT and probe a staged PortableGit folder")
+    check("helpers: resolveBash auto-detects the per-user (no-admin) Git install",
+          "LOCALAPPDATA" in src,
+          "must probe %LOCALAPPDATA%\\Programs\\Git (per-user install, no admin)")
 
     check("helpers: shx() defined", "def shx(String cmd)" in src)
     check("helpers: shxStdout() defined", "def shxStdout(String cmd)" in src)

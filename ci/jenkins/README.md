@@ -257,7 +257,7 @@ If `docker ps` requires root on your host, run as `DOCKER='sudo docker' bash ci/
 ## Installing plugins (air-gapped — recommended)
 
 All required plugins can be bundled for air-gapped installs into `jenkins-plugins.tar.xz`
-following the same model as `vendor.tar.xz` for Rust crates.
+following the same model as the `vendor.tar.gz.*` parts for Rust crates.
 Generate and commit it once (see below), then every `git clone` is fully offline.
 
 The full plugin list is in `ci/jenkins/plugins.txt`.

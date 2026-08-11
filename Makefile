@@ -58,7 +58,7 @@ bundle:
 	    --exclude=./vendor \
 	    --exclude=./oxide-sloc-bundle.tar.gz \
 	    -czf oxide-sloc-bundle.tar.gz .
-	@echo "Done: oxide-sloc-bundle.tar.gz  (vendor.tar.xz included; vendor/ uncompressed excluded)"
+	@echo "Done: oxide-sloc-bundle.tar.gz  (vendor.tar.gz.* included; vendor/ uncompressed excluded)"
 
 docker-build:
 	docker build -t oxide-sloc .

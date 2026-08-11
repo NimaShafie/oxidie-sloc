@@ -525,11 +525,40 @@ For external origins (GitHub Pages, S3), control the `Content-Security-Policy` r
 header directly on that service instead.
 
 > **Windows agents:** every stage runs POSIX `.sh` scripts. On a Linux agent they run
-> natively; on a **Windows agent** the pipeline runs them through **Git Bash** — install
-> Git for Windows (provides `bash.exe` + `curl`/`tar`/`grep`/`awk`/`sha256sum`), or set
-> the `SLOC_BASH` env var to a `bash.exe` path. The WSL `System32\bash.exe` launcher is
-> not used. Pin the job to a Linux node with the **`AGENT_LABEL`** build parameter to
-> avoid the Git-Bash requirement on a mixed Windows/Linux controller.
+> natively; on a **Windows agent** the pipeline runs them through **Git Bash** (which
+> also supplies the MinGW `gcc`/`ld` the `x86_64-pc-windows-gnu` build links against).
+> A **system-wide install of Git for Windows requires admin and is often blocked on
+> locked-down agents — you do not need it.** Choose whichever no-admin option fits:
+>
+> | Option | Admin? | How |
+> |---|---|---|
+> | **Portable Git Bash (recommended)** | No | Download `PortableGit-*.7z.exe` once on any machine, copy it to the air-gapped agent, then run `powershell -ExecutionPolicy Bypass -File ci\jenkins\stage-portable-git.ps1 <PortableGit-*.7z.exe>`. It extracts into `<workspace>\.tools\PortableGit`, which the pipeline auto-detects — no env var needed. Stage it in a shared dir instead and set `SLOC_PORTABLE_GIT` to that folder. |
+> | **Per-user Git install** | No | Git for Windows' installer supports a per-user install into `%LOCALAPPDATA%\Programs\Git` (no admin). The pipeline auto-detects that location. |
+> | **Point at an existing bash** | No | Set `SLOC_BASH` to any `bash.exe` (or `SLOC_PORTABLE_GIT` to a PortableGit folder root). |
+> | **Pin to Linux** | n/a | Set the **`AGENT_LABEL`** build parameter to a Linux node label to skip Windows entirely. |
+>
+> `resolveBash()` probes, in order: `SLOC_BASH` → `SLOC_PORTABLE_GIT` → `where bash`
+> (skipping the WSL `System32\bash.exe` launcher, which is not used) → system installs
+> → `%LOCALAPPDATA%\Programs\Git` → `<workspace>\.tools\PortableGit` → `%USERPROFILE%\PortableGit`
+> → `C:\Tools\PortableGit` → `C:\PortableGit`. It derives the MinGW linker dir from
+> whichever bash it finds, so a portable folder of **any** name works.
+>
+> **Fully bash-free backup:** if you cannot get *any* bash onto the host, build with
+> the native-PowerShell installer instead — it reproduces the whole offline flow
+> (checksum-verify → reassemble split parts → extract with the built-in `tar.exe` →
+> bootstrap the bundled toolchain → `cargo build --release --offline`) using only
+> tools that ship with Windows 10/11, no Git Bash:
+>
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File scripts\internal\install.ps1
+> ```
+>
+> The **one** thing PowerShell cannot supply is the C linker: the bundled toolchain
+> targets `x86_64-pc-windows-gnu`, which links with MinGW `gcc`/`ld`. The installer
+> auto-locates it from a staged PortableGit's `mingw64\bin` (or `-MingwBin <dir>` /
+> `$env:SLOC_MINGW_BIN`, or a `gcc` already on PATH). So a single staged PortableGit
+> folder covers *both* the pipeline's bash path and this native path's linker — you
+> never need a system/admin install of Git for Windows.
 
 #### Adapting to your own project
 

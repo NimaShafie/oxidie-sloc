@@ -6,11 +6,11 @@ publish = false
 
 # This package is never built or published.  It exists solely so that
 # `cargo vendor --sync ci/tools/Cargo.toml` includes the listed tools'
-# source trees in vendor.tar.xz, making them installable on air-gapped
+# source trees in the vendor.tar.gz.* parts, making them installable on air-gapped
 # agents with `cargo install --offline <crate-name>`.
 #
 # To add a new tool: append it here, re-run `bash scripts/internal/update-vendor.sh`,
-# then commit vendor.tar.xz + vendor.tar.xz.sha256.
+# then commit vendor.tar.gz.* + vendor.checksums.sha256.
 
 [dependencies]
 cargo-llvm-cov = "0.8"

@@ -6,7 +6,7 @@
 # you cannot rebuild the image from Dockerfile.agent.
 #
 # Run ONCE on any Linux machine with internet access.  Commit the two output
-# files alongside vendor.tar.xz so any git clone is build-ready end-to-end.
+# files alongside the vendor.tar.gz.* parts so any git clone is build-ready end-to-end.
 #
 # The Jenkinsfile Setup stage checks for rust-toolchain-bundle.tar.xz in the
 # workspace before falling back to the agent image or an internet download.
@@ -51,7 +51,7 @@ sh "${RUSTUP_INIT}" -y \
 rm -f "${RUSTUP_INIT}"
 
 # Strip the cargo registry and git checkout cache — those are covered by
-# vendor.tar.xz at build time and would bloat the bundle unnecessarily.
+# the vendor.tar.gz.* parts at build time and would bloat the bundle unnecessarily.
 rm -rf \
     "${CARGO_HOME}/registry" \
     "${CARGO_HOME}/git" \

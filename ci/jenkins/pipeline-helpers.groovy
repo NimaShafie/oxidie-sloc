@@ -30,9 +30,19 @@
 // none is found. On Unix returns null (the native `sh` step is used instead, so
 // no bash discovery is needed). Discovery order:
 //   1. SLOC_BASH env override (explicit operator escape hatch), if it exists.
-//   2. `where bash` on PATH, skipping the WSL System32 shim (that bash.exe is a
+//   2. SLOC_PORTABLE_GIT env — a *no-install* PortableGit folder root; we probe
+//      <root>\bin\bash.exe and <root>\usr\bin\bash.exe under it.
+//   3. `where bash` on PATH, skipping the WSL System32 shim (that bash.exe is a
 //      launcher for a Linux distro, not a usable POSIX shell for our scripts).
-//   3. Known Git-for-Windows install locations.
+//   4. Known Git-for-Windows locations, INCLUDING no-admin ones: a PortableGit
+//      folder staged in the workspace / common tools dirs, and the per-user
+//      LocalAppData install (%LOCALAPPDATA%\Programs\Git — no admin required).
+//
+// The no-install path matters: installing Git for Windows system-wide needs
+// admin and is a non-starter on locked-down agents. A PortableGit ZIP (or the
+// per-user LocalAppData install) needs neither an installer nor admin — extract
+// a folder, and this resolver finds bash.exe (and the bundled MinGW gcc/ld that
+// initEnv() puts on PATH for the windows-gnu build) inside it.
 def resolveBash() {
     if (isUnix()) { return null }
 
@@ -42,14 +52,30 @@ def resolveBash() {
         return env.SLOC_RESOLVED_BASH.trim()
     }
 
-    // 1. Explicit override.
+    // Given a Git/PortableGit folder ROOT, the two bash.exe layouts under it.
+    // Pure string construction (no pipeline steps) so it is CPS-safe to call.
+    def bashesUnder = { String root ->
+        if (!root?.trim()) { return [] }
+        def r = root.trim().replaceAll('[\\\\/]+$', '')
+        return ["${r}\\bin\\bash.exe", "${r}\\usr\\bin\\bash.exe"]
+    }
+
+    // 1. Explicit bash.exe override.
     def override = env.SLOC_BASH?.trim()
     if (override && fileExists(override)) {
         env.SLOC_RESOLVED_BASH = override
         return override
     }
 
-    // 2. `where bash` — prefer a Git bash over the WSL System32 launcher.
+    // 2. Explicit PortableGit folder root (no-install escape hatch).
+    for (def p in bashesUnder(env.SLOC_PORTABLE_GIT?.trim())) {
+        if (fileExists(p)) {
+            env.SLOC_RESOLVED_BASH = p
+            return p
+        }
+    }
+
+    // 3. `where bash` — prefer a Git bash over the WSL System32 launcher.
     def hits = ''
     try {
         hits = bat(returnStdout: true, script: '@where bash 2>NUL').trim()
@@ -74,12 +100,22 @@ def resolveBash() {
         return picked
     }
 
-    // 3. Known Git-for-Windows locations.
-    def candidates = [
-        'C:\\Program Files\\Git\\bin\\bash.exe',
-        'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
-        'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-    ]
+    // 4. Known Git-for-Windows locations. System-wide installs first, then the
+    //    no-admin fallbacks: a staged PortableGit folder (workspace/.tools or a
+    //    common tools dir) and the per-user LocalAppData install.
+    def ws  = env.WORKSPACE?.trim()
+    def up  = env.USERPROFILE?.trim()
+    def lad = env.LOCALAPPDATA?.trim()
+    def roots = []
+    roots << 'C:\\Program Files\\Git'
+    roots << 'C:\\Program Files (x86)\\Git'
+    if (lad) { roots << "${lad}\\Programs\\Git" }        // per-user, no admin
+    if (ws)  { roots << "${ws}\\.tools\\PortableGit" }   // staged in workspace
+    if (up)  { roots << "${up}\\PortableGit" }
+    roots << 'C:\\Tools\\PortableGit'
+    roots << 'C:\\PortableGit'
+    def candidates = []
+    for (def r in roots) { candidates.addAll(bashesUnder(r)) }
     for (def c in candidates) {
         if (fileExists(c)) {
             env.SLOC_RESOLVED_BASH = c
@@ -91,10 +127,14 @@ def resolveBash() {
 
 // The actionable error shown on a Windows agent with no usable POSIX shell.
 def noBashError() {
-    error('No POSIX shell found on this Windows agent. Install Git for Windows ' +
-          '(provides Git Bash + curl/tar/grep/awk/sha256sum) or set the SLOC_BASH ' +
-          'environment variable to a bash.exe path. Alternatively pin this job to a ' +
-          'Linux agent via the AGENT_LABEL parameter.')
+    error('No POSIX shell found on this Windows agent. No admin/system install is ' +
+          'required — stage a portable Git Bash once (no installer, no admin): run ' +
+          '`powershell -File ci/jenkins/stage-portable-git.ps1 <PortableGit-*.7z.exe>` ' +
+          'to extract it into <workspace>\\.tools\\PortableGit, or point ' +
+          'SLOC_PORTABLE_GIT at an already-extracted PortableGit folder (or SLOC_BASH ' +
+          'at a bash.exe). A per-user Git install under %LOCALAPPDATA%\\Programs\\Git ' +
+          'is also auto-detected. Alternatively pin this job to a Linux agent via the ' +
+          'AGENT_LABEL parameter.')
 }
 
 // Per-build monotonically-increasing counter used to name temp script files
@@ -215,18 +255,31 @@ def initEnv() {
         // MinGW gcc/ld for the x86_64-pc-windows-gnu target. shx() runs NON-login
         // bash (/etc/profile is not sourced), so /mingw64/bin is not injected and
         // the cargo build would fail linking with "linker 'cc' not found". Derive
-        // the Git install root from the resolved bash.exe (…/Git/bin/bash.exe or
-        // …/Git/usr/bin/bash.exe → strip back to the Git/ root) and PREPEND its
+        // the Git install root from the resolved bash.exe and PREPEND its
         // mingw64\bin + usr\bin to PATH (Windows ';'-separated) so gcc/ld resolve.
+        //
+        // Derive the root by LAYOUT, not by a '\Git\' name marker: bash.exe lives
+        // at <root>\bin\bash.exe or <root>\usr\bin\bash.exe under EVERY Git-for-
+        // Windows layout — system, per-user (…\Programs\Git), and a PortableGit
+        // folder (whose name is 'PortableGit', so a '\Git\' marker would miss it).
         // Guarded: only when a Windows bash path was actually resolved.
         def gccPrefix = ''
         def bashPath = resolveBash()
         if (bashPath) {
             def norm = bashPath.replace('/', '\\')
-            def marker = '\\Git\\'
-            def idx = norm.toLowerCase().lastIndexOf(marker.toLowerCase())
-            if (idx >= 0) {
-                def gitRoot = norm.substring(0, idx + marker.length() - 1) // …\Git
+            def lower = norm.toLowerCase()
+            def gitRoot = null
+            if (lower.endsWith('\\usr\\bin\\bash.exe')) {
+                gitRoot = norm.substring(0, norm.length() - '\\usr\\bin\\bash.exe'.length())
+            } else if (lower.endsWith('\\bin\\bash.exe')) {
+                gitRoot = norm.substring(0, norm.length() - '\\bin\\bash.exe'.length())
+            } else {
+                // Fallback: the legacy '\Git\' marker (system-install layouts).
+                def marker = '\\Git\\'
+                def idx = lower.lastIndexOf(marker.toLowerCase())
+                if (idx >= 0) { gitRoot = norm.substring(0, idx + marker.length() - 1) }
+            }
+            if (gitRoot) {
                 gccPrefix = "${gitRoot}\\mingw64\\bin;${gitRoot}\\usr\\bin;"
             }
         }

@@ -8,7 +8,7 @@ any internet access, Docker daemon, or special tooling.
 The `.hpi` files are **not** committed to the repository by default — they are large
 binary blobs that change independently of the source code.  Only commit them if your
 workflow requires fully offline distribution of a known-good plugin set (similar to
-how `vendor.tar.xz` ships Rust crate sources).  The `download.sh` script in this
+how the `vendor.tar.gz.*` parts ship Rust crate sources).  The `download.sh` script in this
 directory is always committed and is enough to regenerate the files on demand.
 
 **Which path for your setup?**
