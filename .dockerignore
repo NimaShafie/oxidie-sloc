@@ -11,8 +11,8 @@ tmp-sloc/
 # OS junk — never needed in the build context.
 .DS_Store
 Thumbs.db
-# Uncompressed vendor tree — the Dockerfile verifies vendor.tar.xz with sha256sum
-# and extracts it at build time, so the pre-expanded directory is never needed.
+# Uncompressed vendor tree — the Dockerfile verifies the vendor.tar.gz.* parts with
+# sha256sum and extracts them at build time, so the pre-expanded directory is never needed.
 vendor/
 # rust-toolchain-bundle is only used by the Jenkins offline agent image.
 rust-toolchain-bundle.tar.xz

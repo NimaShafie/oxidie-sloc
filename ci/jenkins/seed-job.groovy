@@ -87,7 +87,7 @@ Full setup guide: docs/jenkins-manual-setup.md''')
     }
 
     // Prevent concurrent builds on the same agent.  The pipeline writes to a
-    // fixed binary path (target/release/oxide-sloc) and extracts vendor.tar.xz
+    // fixed binary path (target/release/oxide-sloc) and extracts the vendor.tar.gz.* parts
     // into a shared vendor/ directory — simultaneous builds would collide.
     properties {
         disableConcurrentBuilds()

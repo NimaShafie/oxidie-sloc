@@ -28,10 +28,19 @@
 bash scripts/run.sh   # installs on first run, then opens http://127.0.0.1:4317
 ```
 
+On **Windows with no Git Bash**, use the native-PowerShell installer instead — it needs
+no bash and no admin (see [Windows without Git Bash](#windows-without-git-bash)):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\internal\install.ps1
+.\oxide-sloc.exe serve
+```
+
 | Platform | What happens |
 |---|---|
-| **Windows 10/11** (Git Bash) | Extracts pre-built binary from `dist/` — no Rust required |
-| **Linux — Rust installed** | Builds offline from committed `vendor.tar.xz` |
+| **Windows 10/11** (Git Bash) | `bash scripts/run.sh` — extracts the pre-built binary from `dist/`, or builds offline |
+| **Windows 10/11** (no Git Bash) | `powershell -File scripts\internal\install.ps1` — native, no bash; extracts `dist/` or builds fully offline (needs a MinGW linker) |
+| **Linux — Rust installed** | Builds offline from the committed `vendor.tar.gz.*` parts |
 | **Linux — no Rust, toolchain committed** | Bootstraps Rust from `toolchain/` archives, builds offline |
 | **Linux — online** | `bash scripts/internal/install.sh --online` downloads the release binary |
 | **Air-gapped** | See [`docs/airgap.md`](./docs/airgap.md) |
@@ -118,6 +127,37 @@ docker run --rm -v /path/to/your/repo:/repo:ro \
 ```
 
 Set `SLOC_API_KEY`, `SLOC_ALLOWED_ROOTS`, and `SLOC_TLS_CERT`/`SLOC_TLS_KEY` as needed. See [`docs/server-deployment.md`](./docs/server-deployment.md).
+
+### Windows without Git Bash
+
+The bash launchers (`run.sh` / `install.sh`) need Git Bash. On a locked-down or
+air-gapped Windows host where you cannot install Git for Windows (it needs admin),
+use the native-PowerShell installer — it reproduces the full offline flow
+(checksum-verify → reassemble split parts → extract with the built-in `tar.exe` →
+bootstrap the bundled toolchain → `cargo build --release --offline`) using only tools
+that ship with Windows 10/11:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\internal\install.ps1
+# flags: -Rebuild (fresh compile), -Build (compile even if dist\ exists),
+#        -MingwBin <dir>, -SkipDist
+```
+
+If a pre-built binary is committed in `dist\`, it is extracted and no build runs. For a
+source build, the **one** requirement PowerShell cannot supply is a C linker: the bundled
+toolchain targets `x86_64-pc-windows-gnu`, which links with MinGW `gcc`/`ld`. The
+installer auto-locates it from a **PortableGit** folder (a no-install, no-admin extract),
+`-MingwBin <dir>`, `$env:SLOC_MINGW_BIN`, or a `gcc` already on PATH:
+
+```powershell
+# Stage a portable Git Bash once (no installer, no admin) — provides both the
+# bash.exe for CI and the mingw64\bin linker for the native build:
+powershell -ExecutionPolicy Bypass -File ci\jenkins\stage-portable-git.ps1 PortableGit-2.47.0-64-bit.7z.exe
+$env:SLOC_PORTABLE_GIT = 'C:\Tools\PortableGit'   # only if staged outside the workspace
+```
+
+For running the **Jenkins pipeline** on a Windows agent without a system Git install, see
+the Windows-agents section of [`docs/ci-integrations.md`](./docs/ci-integrations.md).
 
 ---
 

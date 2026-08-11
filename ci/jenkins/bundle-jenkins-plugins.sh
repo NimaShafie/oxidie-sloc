@@ -5,7 +5,7 @@
 # Commit the two output files so any git clone is Jenkins-ready — no internet
 # access is needed to install Jenkins plugins after that point.
 #
-# The same model as vendor.tar.xz (Rust crates) and rust-toolchain-bundle.tar.xz:
+# The same model as vendor.tar.gz.* (Rust crates) and rust-toolchain-bundle.tar.xz:
 #   bundle (networked machine)  →  commit  →  install (air-gapped machine)
 #
 # Usage:

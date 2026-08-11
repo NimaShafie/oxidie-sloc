@@ -1,7 +1,7 @@
 # Jenkins controller image for oxide-sloc — fully air-gapped.
 #
 # All required plugins are installed from jenkins-plugins.tar.xz, which is
-# committed to the repository alongside vendor.tar.xz and (optionally)
+# committed to the repository alongside the vendor.tar.gz.* parts and (optionally)
 # rust-toolchain-bundle.tar.xz.  No internet access is needed after
 # `git clone` + `docker build`.
 #

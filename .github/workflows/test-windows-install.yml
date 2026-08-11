@@ -72,9 +72,9 @@ jobs:
 
       # This is the actual test: a plain `bash scripts/internal/install.sh` on a machine
       # that has no Rust, just the committed toolchain/ split archives.
-      # install.sh will: verify checksums, cat-reassemble the .aa/.ab/…/.ae parts,
-      # extract to .tools/, export RUSTUP_HOME/CARGO_HOME/PATH, decompress
-      # vendor.tar.xz, write .cargo/config.toml, and run cargo build --release --offline.
+      # install.sh will: verify checksums, cat-reassemble the split .aa/.ab/… parts,
+      # extract to .tools/, export RUSTUP_HOME/CARGO_HOME/PATH, decompress the
+      # vendor.tar.gz.* parts, write .cargo/config.toml, and run cargo build --release --offline.
       - name: Run install.sh (offline, bundled-toolchain path)
         run: bash scripts/internal/install.sh
 
