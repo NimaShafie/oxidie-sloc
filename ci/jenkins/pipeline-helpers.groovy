@@ -296,6 +296,26 @@ def runSetup() {
     shx 'bash ci/jenkins/check-disk-space.sh'
 
     shx 'bash ci/jenkins/setup-toolchain.sh'
+
+    // Air-gap: pin RUSTUP_TOOLCHAIN on the pipeline env so EVERY downstream stage
+    // (fmt, clippy, build, test, coverage) uses the exact bundled toolchain name
+    // resolved by setup-toolchain.sh. rust-toolchain.toml pins the "1.97" channel,
+    // but the committed bundle installs 1.97.0-<triple>; without this pin an
+    // offline rustup tries to sync the "1.97" channel manifest from
+    // static.rust-lang.org and aborts ("connection reset by peer"). setup-toolchain.sh
+    // records the concrete name in .rust-toolchain-name; each shx() is a fresh
+    // shell so its own export cannot carry — read it here and set it on env.
+    try {
+        def tcName = shxStdout('cat .rust-toolchain-name 2>/dev/null || true')
+            .readLines().findAll { it?.trim() }.last()?.trim()
+        if (tcName) {
+            env.RUSTUP_TOOLCHAIN = tcName
+            echo "Pinned RUSTUP_TOOLCHAIN=${tcName} for all downstream stages (air-gap)."
+        }
+    } catch (Throwable t) {
+        echo "Could not pin RUSTUP_TOOLCHAIN from .rust-toolchain-name: ${t.message}"
+    }
+
     shx 'bash ci/jenkins/setup-vendor.sh'
 
     // ── Artifact-viewer CSP (OPTIONAL — the build succeeds without it) ─────────

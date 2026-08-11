@@ -148,6 +148,31 @@ extract_airgap_toolchain() {
     return 0
 }
 
+# ── Pin RUSTUP_TOOLCHAIN to the exact installed toolchain ─────────────────────
+# rust-toolchain.toml pins the "1.97" channel, but the committed air-gap bundle
+# (and every cache seeded from it) installs the CONCRETE name 1.97.0-<triple>.
+# Offline, rustup cannot map "1.97" → "1.97.0" without fetching the channel
+# manifest from static.rust-lang.org, so `rustup show` and every later cargo call
+# abort with "could not download file …/channel-rust-1.97.toml (connection reset
+# by peer)". Pinning RUSTUP_TOOLCHAIN to the exact installed name makes rustup use
+# that toolchain directly and never touch the network. Also record the name so the
+# Jenkins pipeline can export it for the downstream stages (each shx() is a fresh
+# shell, so this export does not carry on its own). Mirrors the .gitlab-ci.yml pin.
+pin_rustup_toolchain() {
+    local name _rest
+    while read -r name _rest; do
+        case "${name}" in
+            "${TOOLCHAIN}".*|"${TOOLCHAIN}"-*|"${TOOLCHAIN}")
+                export RUSTUP_TOOLCHAIN="${name}"
+                echo "Pinned RUSTUP_TOOLCHAIN=${name} (air-gap: skips channel sync)."
+                printf '%s\n' "${name}" > .rust-toolchain-name 2>/dev/null || true
+                return 0
+                ;;
+        esac
+    done < <(rustup toolchain list 2>/dev/null)
+    return 1
+}
+
 if rustup toolchain list 2>/dev/null | grep -q "${TOOLCHAIN}"; then
     echo "Rust ${TOOLCHAIN} already in persistent cache — skipping install."
 elif extract_airgap_toolchain; then
@@ -197,6 +222,10 @@ else
     echo "============================================================" >&2
     exit 1
 fi
+
+# Pin to the exact installed toolchain BEFORE `rustup show`, or that very command
+# would try to resolve the "1.97" channel over the network on an air-gapped agent.
+pin_rustup_toolchain || echo "No installed toolchain matched channel ${TOOLCHAIN} — leaving rustup to resolve it."
 
 rustup show
 cargo --version

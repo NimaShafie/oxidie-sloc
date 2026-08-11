@@ -99,6 +99,10 @@ testing/fixtures/**/sloc/
 # JUnit test report written to the repo root by the CI test job
 junit.xml
 
+# Concrete Rust toolchain name recorded by ci/jenkins/setup-toolchain.sh so the
+# pipeline can pin RUSTUP_TOOLCHAIN across stages (air-gap channel-sync fix)
+.rust-toolchain-name
+
 # Transferable bundle archives created by `make bundle`
 /oxide-sloc-bundle*.7z
 /oxide-sloc-bundle*.tar.gz
